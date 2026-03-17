@@ -27,6 +27,15 @@ enum SshAuthType {
   privateKey,
 }
 
+/// WebSocket protocol used to connect to the Bridge server.
+enum WebSocketScheme {
+  /// Unencrypted WebSocket
+  ws,
+
+  /// TLS-encrypted WebSocket
+  wss,
+}
+
 /// Bridge Server version information from /version endpoint
 @freezed
 abstract class BridgeVersionInfo with _$BridgeVersionInfo {
@@ -86,6 +95,9 @@ abstract class Machine with _$Machine {
     /// Bridge Server port
     @Default(8765) int port,
 
+    /// WebSocket protocol used for Bridge connections
+    @Default(WebSocketScheme.ws) WebSocketScheme scheme,
+
     /// Whether API key is stored in secure storage
     @Default(false) bool hasApiKey,
 
@@ -120,10 +132,11 @@ abstract class Machine with _$Machine {
   String get displayName => name ?? '$host:$port';
 
   /// WebSocket URL for this machine
-  String get wsUrl => 'ws://$host:$port';
+  String get wsUrl => '${scheme.name}://$host:$port';
 
   /// HTTP base URL for health checks
-  String get httpUrl => 'http://$host:$port';
+  String get httpUrl =>
+      '${scheme == WebSocketScheme.wss ? 'https' : 'http'}://$host:$port';
 
   /// Unique key for deduplication (host:port)
   String get uniqueKey => '$host:$port';

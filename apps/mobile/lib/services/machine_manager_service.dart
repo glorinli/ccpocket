@@ -97,6 +97,7 @@ class MachineManagerService {
                 name: old['name'] as String?,
                 host: host,
                 port: port,
+                scheme: _parseWebSocketScheme(old['scheme']),
                 hasApiKey: old['hasApiKey'] as bool? ?? false,
                 isFavorite: true, // Mark saved machines as favorites
                 sshEnabled: old['sshEnabled'] as bool? ?? false,
@@ -151,6 +152,7 @@ class MachineManagerService {
                 name: entry['name'] as String?,
                 host: host,
                 port: port,
+                scheme: _parseWebSocketScheme(uri.scheme),
                 hasApiKey: apiKey != null && apiKey.isNotEmpty,
                 lastConnected: lastConnected,
                 isFavorite: false, // URL history entries are not favorites
@@ -176,6 +178,11 @@ class MachineManagerService {
   SshAuthType _parseSshAuthType(dynamic value) {
     if (value == 'privateKey') return SshAuthType.privateKey;
     return SshAuthType.password;
+  }
+
+  WebSocketScheme _parseWebSocketScheme(dynamic value) {
+    if (value == 'wss') return WebSocketScheme.wss;
+    return WebSocketScheme.ws;
   }
 
   /// Load machines from SharedPreferences
@@ -275,6 +282,7 @@ class MachineManagerService {
   Future<Machine> recordConnection({
     required String host,
     required int port,
+    WebSocketScheme scheme = WebSocketScheme.ws,
     String? apiKey,
     String? name,
   }) async {
@@ -285,6 +293,7 @@ class MachineManagerService {
       machine = machine.copyWith(
         lastConnected: DateTime.now(),
         name: name ?? machine.name,
+        scheme: scheme,
       );
       final index = _machines.indexWhere((m) => m.id == machine!.id);
       if (index != -1) {
@@ -296,6 +305,7 @@ class MachineManagerService {
         id: _uuid.v4(),
         host: host,
         port: port,
+        scheme: scheme,
         name: name,
         lastConnected: DateTime.now(),
         hasApiKey: apiKey != null && apiKey.isNotEmpty,
@@ -328,8 +338,19 @@ class MachineManagerService {
   // ---- CRUD Operations ----
 
   /// Generate a new machine with unique ID
-  Machine createNew({String? name, required String host, int port = 8765}) {
-    return Machine(id: _uuid.v4(), name: name, host: host, port: port);
+  Machine createNew({
+    String? name,
+    required String host,
+    int port = 8765,
+    WebSocketScheme scheme = WebSocketScheme.ws,
+  }) {
+    return Machine(
+      id: _uuid.v4(),
+      name: name,
+      host: host,
+      port: port,
+      scheme: scheme,
+    );
   }
 
   /// Add a new machine

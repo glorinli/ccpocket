@@ -46,11 +46,18 @@ class MockMachineManagerService implements MachineManagerService {
   Future<Machine> recordConnection({
     required String host,
     required int port,
+    WebSocketScheme scheme = WebSocketScheme.ws,
     String? apiKey,
     String? name,
   }) async {
     calls.add('recordConnection:$host:$port');
-    return Machine(id: 'new-id', host: host, port: port, name: name);
+    return Machine(
+      id: 'new-id',
+      host: host,
+      port: port,
+      scheme: scheme,
+      name: name,
+    );
   }
 
   @override
@@ -107,8 +114,19 @@ class MockMachineManagerService implements MachineManagerService {
   Future<String> buildWsUrl(String machineId) async => 'ws://mock:8765';
 
   @override
-  Machine createNew({String? name, required String host, int port = 8765}) {
-    return Machine(id: 'gen-id', name: name, host: host, port: port);
+  Machine createNew({
+    String? name,
+    required String host,
+    int port = 8765,
+    WebSocketScheme scheme = WebSocketScheme.ws,
+  }) {
+    return Machine(
+      id: 'gen-id',
+      name: name,
+      host: host,
+      port: port,
+      scheme: scheme,
+    );
   }
 
   @override

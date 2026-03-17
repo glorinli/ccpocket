@@ -209,7 +209,11 @@ class _MetadataLine extends StatelessWidget {
     // Build metadata parts
     final parts = <InlineSpan>[];
 
+    // Show the selected protocol so ws/wss machines are distinguishable in the list.
+    parts.add(TextSpan(text: machine.scheme.name));
+
     // Host:Port (if name is set, show host:port; otherwise show last connected)
+    parts.add(const TextSpan(text: ' · '));
     if (machine.name != null) {
       parts.add(TextSpan(text: '${machine.host}:${machine.port}'));
     } else {

@@ -62,6 +62,7 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
   late final TextEditingController _sshPortController;
   late final TextEditingController _sshPasswordController;
   late final TextEditingController _sshPrivateKeyController;
+  late WebSocketScheme _scheme;
   bool _sshEnabled = false;
   SshAuthType _sshAuthType = SshAuthType.password;
   bool _isSaving = false;
@@ -93,8 +94,11 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
     _sshPrivateKeyController = TextEditingController();
 
     if (m != null) {
+      _scheme = m.scheme;
       _sshEnabled = m.sshEnabled;
       _sshAuthType = m.sshAuthType;
+    } else {
+      _scheme = WebSocketScheme.ws;
     }
   }
 
@@ -181,6 +185,7 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
             : null,
         host: _hostController.text.trim(),
         port: int.tryParse(_portController.text) ?? 8765,
+        scheme: _scheme,
         sshEnabled: _sshEnabled,
         sshUsername: _sshEnabled ? _sshUsernameController.text.trim() : null,
         sshPort: int.tryParse(_sshPortController.text) ?? 22,
@@ -294,6 +299,25 @@ class _MachineEditSheetState extends State<MachineEditSheet> {
                         prefixIcon: Icon(Icons.computer),
                         border: OutlineInputBorder(),
                       ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    SegmentedButton<WebSocketScheme>(
+                      key: const ValueKey('machine_scheme_toggle'),
+                      segments: const [
+                        ButtonSegment<WebSocketScheme>(
+                          value: WebSocketScheme.ws,
+                          label: Text('ws'),
+                        ),
+                        ButtonSegment<WebSocketScheme>(
+                          value: WebSocketScheme.wss,
+                          label: Text('wss'),
+                        ),
+                      ],
+                      selected: {_scheme},
+                      onSelectionChanged: (selection) {
+                        setState(() => _scheme = selection.first);
+                      },
                     ),
                     const SizedBox(height: 12),
 

@@ -80,12 +80,14 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
   Future<Machine> recordConnection({
     required String host,
     required int port,
+    WebSocketScheme scheme = WebSocketScheme.ws,
     String? apiKey,
     String? name,
   }) async {
     return await _service.recordConnection(
       host: host,
       port: port,
+      scheme: scheme,
       apiKey: apiKey,
       name: name,
     );
@@ -356,7 +358,8 @@ class MachineManagerCubit extends Cubit<MachineManagerState> {
     String? name,
     required String host,
     int port = 8765,
-  }) => _service.createNew(name: name, host: host, port: port);
+    WebSocketScheme scheme = WebSocketScheme.ws,
+  }) => _service.createNew(name: name, host: host, port: port, scheme: scheme);
 
   /// Start periodic health check
   void startPeriodicHealthCheck() {

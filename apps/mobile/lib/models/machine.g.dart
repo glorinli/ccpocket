@@ -31,6 +31,9 @@ _Machine _$MachineFromJson(Map<String, dynamic> json) => _Machine(
   name: json['name'] as String?,
   host: json['host'] as String,
   port: (json['port'] as num?)?.toInt() ?? 8765,
+  scheme:
+      $enumDecodeNullable(_$WebSocketSchemeEnumMap, json['scheme']) ??
+      WebSocketScheme.ws,
   hasApiKey: json['hasApiKey'] as bool? ?? false,
   lastConnected: json['lastConnected'] == null
       ? null
@@ -50,6 +53,7 @@ Map<String, dynamic> _$MachineToJson(_Machine instance) => <String, dynamic>{
   'name': instance.name,
   'host': instance.host,
   'port': instance.port,
+  'scheme': _$WebSocketSchemeEnumMap[instance.scheme]!,
   'hasApiKey': instance.hasApiKey,
   'lastConnected': instance.lastConnected?.toIso8601String(),
   'isFavorite': instance.isFavorite,
@@ -58,6 +62,11 @@ Map<String, dynamic> _$MachineToJson(_Machine instance) => <String, dynamic>{
   'sshPort': instance.sshPort,
   'sshAuthType': _$SshAuthTypeEnumMap[instance.sshAuthType]!,
   'hasCredentials': instance.hasCredentials,
+};
+
+const _$WebSocketSchemeEnumMap = {
+  WebSocketScheme.ws: 'ws',
+  WebSocketScheme.wss: 'wss',
 };
 
 const _$SshAuthTypeEnumMap = {
