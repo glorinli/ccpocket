@@ -159,20 +159,11 @@ class _SessionListScreenState extends State<SessionListScreen>
           // Mark the newly created session as seen so it doesn't
           // appear as unseen when the user returns to the list.
           _unseenCubit.markSeen(msg.sessionId!);
+          // Only navigate when the user explicitly started or resumed a session.
           if (_pendingNavigation) {
             // Chat screen may not have its listener yet — store for replay.
             _pendingNavigation = false;
             _pendingSessionCreated.value = msg;
-          } else {
-            _navigateToChat(
-              msg.sessionId!,
-              projectPath: msg.projectPath ?? _pendingResumeProjectPath,
-              gitBranch: _pendingResumeGitBranch,
-              worktreePath: msg.worktreePath,
-              provider: msg.provider == 'codex' ? Provider.codex : null,
-              permissionMode: msg.permissionMode,
-              sandboxMode: msg.sandboxMode,
-            );
           }
           _pendingResumeProjectPath = null;
           _pendingResumeGitBranch = null;
@@ -865,6 +856,7 @@ class _SessionListScreenState extends State<SessionListScreen>
     final resumeProjectPath = session.resumeCwd ?? session.projectPath;
     _pendingResumeProjectPath = resumeProjectPath;
     _pendingResumeGitBranch = session.gitBranch;
+    _pendingNavigation = true;
 
     final isCodex = session.provider == Provider.codex.value;
 
@@ -950,6 +942,7 @@ class _SessionListScreenState extends State<SessionListScreen>
     final resumeProjectPath = session.resumeCwd ?? session.projectPath;
     _pendingResumeProjectPath = resumeProjectPath;
     _pendingResumeGitBranch = session.gitBranch;
+    _pendingNavigation = true;
 
     final isCodex = edited.provider == Provider.codex;
     context.read<BridgeService>().resumeSession(
