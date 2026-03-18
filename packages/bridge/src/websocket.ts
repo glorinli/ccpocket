@@ -227,8 +227,16 @@ export class BridgeWebSocketServer {
       const msg = parseClientMessage(raw);
 
       if (!msg) {
-        console.error("[ws] Invalid message:", raw.slice(0, 200));
-        this.send(ws, { type: "error", message: "Invalid message format" });
+        // Try to extract the message type so the client can decide how to
+        // handle the unsupported message (suppress vs show update hint).
+        let rawType: string | undefined;
+        try { rawType = (JSON.parse(raw) as Record<string, unknown>)?.type as string; } catch { /* ignore */ }
+        console.error("[ws] Unsupported message:", rawType ?? raw.slice(0, 200));
+        this.send(ws, {
+          type: "error",
+          errorCode: "unsupported_message",
+          message: rawType ?? "unknown",
+        });
         return;
       }
 
@@ -1080,6 +1088,29 @@ export class BridgeWebSocketServer {
               ...(cached.skillMetadata ? { skillMetadata: cached.skillMetadata } : {}),
             });
           }
+        } else {
+          this.send(ws, { type: "error", message: `Session ${msg.sessionId} not found` });
+        }
+        break;
+      }
+
+      case "refresh_branch": {
+        const session = this.sessionManager.get(msg.sessionId);
+        if (session) {
+          const cwd = session.worktreePath ?? session.projectPath;
+          let branch = "";
+          try {
+            branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+              cwd, encoding: "utf-8",
+            }).trim();
+          } catch { /* not a git repo */ }
+          // Update stored branch so future session_list responses are also current
+          session.gitBranch = branch;
+          this.send(ws, {
+            type: "branch_update",
+            sessionId: msg.sessionId,
+            branch,
+          });
         } else {
           this.send(ws, { type: "error", message: `Session ${msg.sessionId} not found` });
         }

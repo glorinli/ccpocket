@@ -4,7 +4,7 @@ class AppConstants {
 
   /// Expected Bridge Server version (from packages/bridge/package.json)
   /// Used to check if the server needs updating
-  static const String expectedBridgeVersion = '1.21.2';
+  static const String expectedBridgeVersion = '1.22.1';
 
   /// Maximum number of machines to keep in history
   /// Favorites are always kept, non-favorites are pruned by lastConnected
@@ -16,8 +16,7 @@ class AppConstants {
   // ── External links ──
 
   /// Install landing page (redirects to App Store / Play Store on mobile)
-  static const String installUrl =
-      'https://k9i-0.github.io/ccpocket/install';
+  static const String installUrl = 'https://k9i-0.github.io/ccpocket/install';
 
   /// Primary share URL — uses install page for better mobile conversion
   static const String shareUrl = installUrl;

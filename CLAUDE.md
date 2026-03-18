@@ -95,6 +95,7 @@ Flutter App ←WebSocket→ websocket.ts ←→ session.ts ─┤
 | `BRIDGE_RECORDING` | (なし) | セッション録画を有効化 (設定時に有効化) |
 | `DIFF_IMAGE_AUTO_DISPLAY_KB` | `1024` (1MB) | Diff画像の自動表示閾値 (KB単位) |
 | `DIFF_IMAGE_MAX_SIZE_MB` | `5` (5MB) | Diff画像の最大サイズ (MB単位、超過はテキストのみ) |
+| `HTTPS_PROXY` | (なし) | プロキシ設定 (`http://`, `socks5://` 対応) |
 
 ### プッシュ通知 (FCM)
 
@@ -126,6 +127,16 @@ Cloud Functions (relay) がFCMトークンの管理とプッシュ送信を担�
 - `stream_delta` - ストリーミングテキスト差分
 - `session_list` - セッション一覧
 - `diff_result` - git diff結果 (diff, error?)
+
+### Bridge 非対応メッセージの Graceful Degradation
+
+アプリが新しいメッセージタイプを送り、古い Bridge が認識できない場合の処理基盤。
+
+- **Bridge 側**: `errorCode: "unsupported_message"` + 元のタイプ名を返す (`websocket.ts`)
+- **App 側**: `chat_message_handler.dart` の `_unsupportedActions` マップでタイプ別に振る舞いを制御
+  - `suppress` (デフォルト) — ログのみ、UIに表示しない (バックグラウンド機能向け)
+  - `showUpdateHint` — amber warning バブルで Bridge 更新を案内 (ユーザー操作向け)
+- 新機能追加時は `_unsupportedActions` に1行追加するだけでOK
 
 ## リモートアクセス設定
 
