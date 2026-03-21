@@ -71,6 +71,25 @@ String shortenPath(String path) {
   return path;
 }
 
+/// Quote a shell argument so it can be pasted safely into POSIX shells.
+String shellQuote(String value) {
+  return "'${value.replaceAll("'", r"'\''")}'";
+}
+
+/// Build a provider-specific CLI resume command for handoff to another machine.
+String buildResumeCommand(RecentSession session) {
+  final cwd = (session.resumeCwd?.isNotEmpty ?? false)
+      ? session.resumeCwd!
+      : session.projectPath;
+  final provider = session.provider == Provider.codex.value
+      ? Provider.codex
+      : Provider.claude;
+  final resumeCommand = provider == Provider.codex
+      ? 'codex resume ${shellQuote(session.sessionId)}'
+      : 'claude --resume ${shellQuote(session.sessionId)}';
+  return 'cd ${shellQuote(cwd)} && $resumeCommand';
+}
+
 /// Filter sessions by text query (matches name, firstPrompt, lastPrompt and summary).
 List<RecentSession> filterByQuery(List<RecentSession> sessions, String query) {
   if (query.isEmpty) return sessions;
@@ -475,6 +494,8 @@ class _SessionListScreenState extends State<SessionListScreen>
       ClientMessage.start(
         result.projectPath,
         permissionMode: result.permissionMode.value,
+        executionMode: result.executionMode.value,
+        planMode: result.planMode,
         effort: result.provider == Provider.claude
             ? result.claudeEffort?.value
             : null,
@@ -578,6 +599,8 @@ class _SessionListScreenState extends State<SessionListScreen>
   ) {
     return <String, dynamic>{
       'permissionMode': params.permissionMode.value,
+      'executionMode': params.executionMode.value,
+      'planMode': params.planMode,
       if (params.sandboxMode != null) 'sandboxMode': params.sandboxMode!.value,
       if (params.claudeModel != null) 'claudeModel': params.claudeModel,
       if (params.claudeEffort != null)
@@ -609,11 +632,16 @@ class _SessionListScreenState extends State<SessionListScreen>
     return NewSessionParams(
       projectPath: session.projectPath,
       provider: provider,
-      permissionMode:
-          permissionModeFromRaw(
-            sessionSettings?['permissionMode'] as String?,
-          ) ??
-          PermissionMode.acceptEdits,
+      executionMode: deriveExecutionMode(
+        provider: provider.value,
+        executionMode: sessionSettings?['executionMode'] as String?,
+        permissionMode: sessionSettings?['permissionMode'] as String?,
+        approvalPolicy: session.codexApprovalPolicy,
+      ),
+      planMode: derivePlanMode(
+        planMode: sessionSettings?['planMode'] as bool?,
+        permissionMode: sessionSettings?['permissionMode'] as String?,
+      ),
       useWorktree: hasExistingWorktree,
       worktreeBranch: session.gitBranch.isNotEmpty ? session.gitBranch : null,
       existingWorktreePath: hasExistingWorktree ? existingWorktreePath : null,
@@ -703,6 +731,12 @@ class _SessionListScreenState extends State<SessionListScreen>
               onTap: () => Navigator.pop(ctx, 'start_same'),
             ),
             ListTile(
+              leading: const Icon(Icons.terminal),
+              title: Text(l.copyResumeCommand),
+              subtitle: Text(l.copyResumeCommandSubtitle),
+              onTap: () => Navigator.pop(ctx, 'copy_resume_command'),
+            ),
+            ListTile(
               leading: const Icon(Icons.tune),
               title: Text(l.editSettingsThenStart),
               onTap: () => Navigator.pop(ctx, 'start_edit'),
@@ -755,6 +789,15 @@ class _SessionListScreenState extends State<SessionListScreen>
       // Don't save as defaults — these are session-specific settings from a
       // recent session, not user-chosen defaults for future sessions.
       _startNewSession(params);
+      return;
+    }
+
+    if (action == 'copy_resume_command') {
+      await Clipboard.setData(ClipboardData(text: buildResumeCommand(session)));
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l.resumeCommandCopied)));
       return;
     }
 
@@ -894,6 +937,7 @@ class _SessionListScreenState extends State<SessionListScreen>
     final persistSession =
         sessionSettings?['claudePersistSession'] as bool? ??
         claudeDefaults?.claudePersistSession;
+    final codexModel = sanitizeCodexModelName(session.codexModel);
 
     context.read<BridgeService>().resumeSession(
       session.sessionId,
@@ -903,6 +947,24 @@ class _SessionListScreenState extends State<SessionListScreen>
                 ? 'bypassPermissions'
                 : 'acceptEdits')
           : permissionMode,
+      executionMode: isCodex
+          ? deriveExecutionMode(
+              provider: Provider.codex.value,
+              executionMode: session.executionMode,
+              permissionMode: session.permissionMode,
+              approvalPolicy: session.codexApprovalPolicy,
+            ).value
+          : deriveExecutionMode(
+              provider: Provider.claude.value,
+              executionMode: sessionSettings?['executionMode'] as String?,
+              permissionMode: permissionMode,
+            ).value,
+      planMode: isCodex
+          ? session.planMode
+          : derivePlanMode(
+              planMode: sessionSettings?['planMode'] as bool?,
+              permissionMode: permissionMode,
+            ),
       effort: !isCodex ? effort : null,
       maxTurns: !isCodex ? claudeDefaults?.claudeMaxTurns : null,
       maxBudgetUsd: !isCodex ? claudeDefaults?.claudeMaxBudgetUsd : null,
@@ -911,7 +973,7 @@ class _SessionListScreenState extends State<SessionListScreen>
       persistSession: !isCodex ? persistSession : null,
       provider: session.provider,
       sandboxMode: isCodex ? session.codexSandboxMode : sandboxMode,
-      model: isCodex ? session.codexModel : claudeModel,
+      model: isCodex ? codexModel : claudeModel,
       modelReasoningEffort: session.codexModelReasoningEffort,
       networkAccessEnabled: session.codexNetworkAccessEnabled,
       webSearchMode: session.codexWebSearchMode,
@@ -919,8 +981,19 @@ class _SessionListScreenState extends State<SessionListScreen>
 
     // Persist settings for this session (so the next resume uses them too).
     if (!isCodex) {
+      final derivedExecutionMode = deriveExecutionMode(
+        provider: Provider.claude.value,
+        executionMode: sessionSettings?['executionMode'] as String?,
+        permissionMode: permissionMode,
+      ).value;
+      final derivedPlanMode = derivePlanMode(
+        planMode: sessionSettings?['planMode'] as bool?,
+        permissionMode: permissionMode,
+      );
       final settings = <String, dynamic>{
         'permissionMode': ?permissionMode,
+        'executionMode': derivedExecutionMode,
+        'planMode': derivedPlanMode,
         'sandboxMode': ?sandboxMode,
         'claudeEffort': ?effort,
         'claudeModel': ?claudeModel,
@@ -949,6 +1022,8 @@ class _SessionListScreenState extends State<SessionListScreen>
       session.sessionId,
       resumeProjectPath,
       permissionMode: edited.permissionMode.value,
+      executionMode: edited.executionMode.value,
+      planMode: edited.planMode,
       effort: !isCodex ? edited.claudeEffort?.value : null,
       maxTurns: !isCodex ? edited.claudeMaxTurns : null,
       maxBudgetUsd: !isCodex ? edited.claudeMaxBudgetUsd : null,

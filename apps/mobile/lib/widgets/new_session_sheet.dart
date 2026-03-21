@@ -16,7 +16,8 @@ import '../theme/provider_style.dart';
 class NewSessionParams {
   final String projectPath;
   final Provider provider;
-  final PermissionMode permissionMode;
+  final ExecutionMode executionMode;
+  final bool planMode;
   final bool useWorktree;
   final String? worktreeBranch;
   final String? existingWorktreePath;
@@ -33,10 +34,12 @@ class NewSessionParams {
   final bool? claudeForkSession;
   final bool? claudePersistSession;
 
-  const NewSessionParams({
+  NewSessionParams({
     required this.projectPath,
-    this.provider = Provider.claude,
-    required this.permissionMode,
+    this.provider = Provider.codex,
+    ExecutionMode? executionMode,
+    bool? planMode,
+    PermissionMode? permissionMode,
     this.useWorktree = false,
     this.worktreeBranch,
     this.existingWorktreePath,
@@ -52,7 +55,19 @@ class NewSessionParams {
     this.claudeFallbackModel,
     this.claudeForkSession,
     this.claudePersistSession,
-  });
+  }) : executionMode =
+           executionMode ??
+           deriveExecutionMode(
+             provider: provider.value,
+             permissionMode: permissionMode?.value,
+           ),
+       planMode = planMode ?? (permissionMode == PermissionMode.plan);
+
+  PermissionMode get permissionMode => legacyPermissionModeFromModes(
+    provider,
+    executionMode: executionMode,
+    planMode: planMode,
+  );
 }
 
 // ---- Serialization helpers for SharedPreferences ----
@@ -80,13 +95,22 @@ WebSearchMode? webSearchModeFromRaw(String? raw) =>
     enumByValue(WebSearchMode.values, raw, (v) => v.value);
 
 Provider _providerFromRaw(String? raw) =>
-    enumByValue(Provider.values, raw, (v) => v.value) ?? Provider.claude;
+    enumByValue(Provider.values, raw, (v) => v.value) ?? Provider.codex;
 
 PermissionMode? permissionModeFromRaw(String? raw) =>
     enumByValue(PermissionMode.values, raw, (v) => v.value);
 
-PermissionMode _permissionModeFromRawWithDefault(String? raw) =>
-    permissionModeFromRaw(raw) ?? PermissionMode.acceptEdits;
+ExecutionMode _executionModeFromRawWithDefault(
+  String? raw, {
+  String? provider,
+  String? permissionMode,
+  String? approvalPolicy,
+}) => deriveExecutionMode(
+  provider: provider,
+  executionMode: raw,
+  permissionMode: permissionMode,
+  approvalPolicy: approvalPolicy,
+);
 
 ClaudeEffort? claudeEffortFromRaw(String? raw) =>
     enumByValue(ClaudeEffort.values, raw, (v) => v.value);
@@ -100,6 +124,8 @@ Map<String, dynamic> sessionStartDefaultsToJson(NewSessionParams params) {
   return {
     'projectPath': params.projectPath,
     'provider': params.provider.value,
+    'executionMode': params.executionMode.value,
+    'planMode': params.planMode,
     'permissionMode': params.permissionMode.value,
     // NOTE: useWorktree, worktreeBranch, existingWorktreePath are
     // session-specific and intentionally NOT persisted.
@@ -125,8 +151,14 @@ NewSessionParams? sessionStartDefaultsFromJson(Map<String, dynamic> json) {
   return NewSessionParams(
     projectPath: projectPath,
     provider: _providerFromRaw(json['provider'] as String?),
-    permissionMode: _permissionModeFromRawWithDefault(
-      json['permissionMode'] as String?,
+    executionMode: _executionModeFromRawWithDefault(
+      json['executionMode'] as String?,
+      provider: json['provider'] as String?,
+      permissionMode: json['permissionMode'] as String?,
+    ),
+    planMode: derivePlanMode(
+      planMode: json['planMode'] as bool?,
+      permissionMode: json['permissionMode'] as String?,
     ),
     // useWorktree, worktreeBranch, existingWorktreePath default to off/null
     model: json['model'] as String?,
@@ -220,6 +252,7 @@ enum _WorktreeMode {
 /// Fallback Codex models when Bridge hasn't delivered a list yet.
 const _defaultCodexModels = <String>[
   'gpt-5.4',
+  'gpt-5.4-mini',
   'gpt-5.3-codex',
   'gpt-5.3-codex-spark',
   'gpt-5.2-codex',
@@ -239,8 +272,9 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   final _claudeMaxTurnsController = TextEditingController();
   final _claudeMaxBudgetController = TextEditingController();
   late final PageController _pageController;
-  var _provider = Provider.claude;
-  var _permissionMode = PermissionMode.acceptEdits;
+  var _provider = Provider.codex;
+  var _executionMode = ExecutionMode.defaultMode;
+  var _planMode = false;
   var _useWorktree = false;
   var _worktreeMode = _WorktreeMode.createNew;
   WorktreeInfo? _selectedWorktree;
@@ -340,7 +374,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
   void initState() {
     super.initState();
     _pageController = PageController(
-      initialPage: widget.initialParams?.provider == Provider.codex ? 1 : 0,
+      initialPage: widget.initialParams?.provider == Provider.claude ? 1 : 0,
     );
     // Use the latest cached recent sessions from BridgeService if available,
     // because the broadcast stream may have already fired before this listener
@@ -430,7 +464,8 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
 
     _pathController.text = p.projectPath;
     _provider = p.provider;
-    _permissionMode = p.permissionMode;
+    _executionMode = p.executionMode;
+    _planMode = p.planMode;
     _useWorktree = p.useWorktree || p.existingWorktreePath != null;
     _branchController.text = p.worktreeBranch ?? "";
     _selectedModel = _codexModelList.contains(p.model) ? p.model : null;
@@ -565,7 +600,8 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
     return NewSessionParams(
       projectPath: path,
       provider: _provider,
-      permissionMode: _permissionMode,
+      executionMode: _executionMode,
+      planMode: isCodex ? false : _planMode,
       useWorktree: useExisting ? false : _useWorktree,
       worktreeBranch: useExisting
           ? _selectedWorktree?.branch
@@ -681,9 +717,13 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
           _OptionsSection(
             appColors: appColors,
             provider: pageProvider,
-            permissionMode: _permissionMode,
-            onPermissionModeChanged: (value) {
-              setState(() => _permissionMode = value);
+            executionMode: _executionMode,
+            onExecutionModeChanged: (value) {
+              setState(() => _executionMode = value);
+            },
+            planMode: _planMode,
+            onPlanModeChanged: (value) {
+              setState(() => _planMode = value);
             },
             useWorktree: _useWorktree,
             onWorktreeToggle: _onWorktreeToggle,
@@ -766,7 +806,7 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
 
   void _onProviderChanged(Provider p) {
     setState(() => _provider = p);
-    final page = p == Provider.claude ? 0 : 1;
+    final page = p == Provider.codex ? 0 : 1;
     _pageController.animateToPage(
       page,
       duration: const Duration(milliseconds: 300),
@@ -834,12 +874,12 @@ class _NewSessionSheetContentState extends State<_NewSessionSheetContent> {
                       : null,
                   onPageChanged: (index) {
                     setState(() {
-                      _provider = index == 0 ? Provider.claude : Provider.codex;
+                      _provider = index == 0 ? Provider.codex : Provider.claude;
                     });
                   },
                   children: [
-                    _buildPage(Provider.claude),
                     _buildPage(Provider.codex),
+                    _buildPage(Provider.claude),
                   ],
                 ),
               ),
@@ -927,24 +967,24 @@ class _SheetTitle extends StatelessWidget {
               children: [
                 Expanded(
                   child: _ProviderToggleButton(
-                    provider: Provider.claude,
-                    isSelected: provider == Provider.claude,
-                    isLocked: lockProvider,
-                    onTap: () {
-                      if (!lockProvider) {
-                        onProviderChanged(Provider.claude);
-                      }
-                    },
-                  ),
-                ),
-                Expanded(
-                  child: _ProviderToggleButton(
                     provider: Provider.codex,
                     isSelected: provider == Provider.codex,
                     isLocked: lockProvider,
                     onTap: () {
                       if (!lockProvider) {
                         onProviderChanged(Provider.codex);
+                      }
+                    },
+                  ),
+                ),
+                Expanded(
+                  child: _ProviderToggleButton(
+                    provider: Provider.claude,
+                    isSelected: provider == Provider.claude,
+                    isLocked: lockProvider,
+                    onTap: () {
+                      if (!lockProvider) {
+                        onProviderChanged(Provider.claude);
                       }
                     },
                   ),
@@ -1219,8 +1259,10 @@ class _PathInput extends StatelessWidget {
 class _OptionsSection extends StatelessWidget {
   final AppColors appColors;
   final Provider provider;
-  final PermissionMode permissionMode;
-  final ValueChanged<PermissionMode> onPermissionModeChanged;
+  final ExecutionMode executionMode;
+  final ValueChanged<ExecutionMode> onExecutionModeChanged;
+  final bool planMode;
+  final ValueChanged<bool> onPlanModeChanged;
   final bool useWorktree;
   final ValueChanged<bool> onWorktreeToggle;
   final _WorktreeMode worktreeMode;
@@ -1272,8 +1314,10 @@ class _OptionsSection extends StatelessWidget {
   const _OptionsSection({
     required this.appColors,
     required this.provider,
-    required this.permissionMode,
-    required this.onPermissionModeChanged,
+    required this.executionMode,
+    required this.onExecutionModeChanged,
+    required this.planMode,
+    required this.onPlanModeChanged,
     required this.useWorktree,
     required this.onWorktreeToggle,
     required this.worktreeMode,
@@ -1316,6 +1360,71 @@ class _OptionsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context);
+    final selectedPermissionMode = legacyPermissionModeFromModes(
+      provider,
+      executionMode: executionMode,
+      planMode: planMode,
+    );
+
+    String executionDescription(ExecutionMode mode) {
+      return switch (mode) {
+        ExecutionMode.defaultMode => l.executionDefaultDescription,
+        ExecutionMode.acceptEdits => l.executionAcceptEditsDescription,
+        ExecutionMode.fullAccess => l.executionFullAccessDescription,
+      };
+    }
+
+    String permissionDescription(PermissionMode mode) {
+      return switch (mode) {
+        PermissionMode.defaultMode => l.permissionDefaultDescription,
+        PermissionMode.acceptEdits => l.permissionAcceptEditsDescription,
+        PermissionMode.plan => l.permissionPlanDescription,
+        PermissionMode.bypassPermissions => l.permissionBypassDescription,
+      };
+    }
+
+    String sandboxDescription(SandboxMode mode) {
+      if (provider == Provider.claude) {
+        return mode == SandboxMode.on
+            ? l.sandboxRestrictedDescription
+            : l.sandboxNativeDescription;
+      }
+      return mode == SandboxMode.on
+          ? l.sandboxRestrictedDescription
+          : l.sandboxNativeCautionDescription;
+    }
+
+    Widget selectedFieldContent({
+      required IconData icon,
+      required String title,
+      required String subtitle,
+    }) {
+      return Row(
+        children: [
+          Icon(icon, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 13)),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
@@ -1333,43 +1442,165 @@ class _OptionsSection extends StatelessWidget {
               ),
             ),
           ),
-          // Primary controls: Permission + Sandbox (shared for both providers)
-          DropdownButtonFormField<PermissionMode>(
-            key: ValueKey(
-              'dialog_${provider == Provider.codex ? "codex_" : ""}permission_mode',
-            ),
-            initialValue: permissionMode,
-            decoration: buildInputDecoration(l.permission),
-            items: PermissionMode.values
-                .map(
-                  (m) => DropdownMenuItem(
-                    value: m,
-                    child: Row(
-                      children: [
-                        Icon(switch (m) {
-                          PermissionMode.defaultMode => Icons.tune,
-                          PermissionMode.plan => Icons.assignment,
-                          PermissionMode.acceptEdits => Icons.edit_note,
-                          PermissionMode.bypassPermissions => Icons.flash_on,
-                        }, size: 16),
-                        const SizedBox(width: 8),
-                        Text(m.label, style: const TextStyle(fontSize: 13)),
-                      ],
+          provider == Provider.codex
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    DropdownButtonFormField<ExecutionMode>(
+                      key: const ValueKey('dialog_codex_execution_mode'),
+                      initialValue: executionMode,
+                      isExpanded: true,
+                      decoration: buildInputDecoration(l.approval),
+                      selectedItemBuilder: (context) =>
+                          const [
+                                ExecutionMode.defaultMode,
+                                ExecutionMode.fullAccess,
+                              ]
+                              .map(
+                                (mode) => selectedFieldContent(
+                                  icon: switch (mode) {
+                                    ExecutionMode.defaultMode => Icons.tune,
+                                    ExecutionMode.acceptEdits =>
+                                      Icons.edit_note,
+                                    ExecutionMode.fullAccess => Icons.flash_on,
+                                  },
+                                  title: switch (mode) {
+                                    ExecutionMode.fullAccess => 'Full Access',
+                                    _ => mode.label,
+                                  },
+                                  subtitle: executionDescription(mode),
+                                ),
+                              )
+                              .toList(),
+                      items:
+                          const [
+                                ExecutionMode.defaultMode,
+                                ExecutionMode.fullAccess,
+                              ]
+                              .map(
+                                (mode) => DropdownMenuItem(
+                                  value: mode,
+                                  child: Row(
+                                    children: [
+                                      Icon(switch (mode) {
+                                        ExecutionMode.defaultMode => Icons.tune,
+                                        ExecutionMode.acceptEdits =>
+                                          Icons.edit_note,
+                                        ExecutionMode.fullAccess =>
+                                          Icons.flash_on,
+                                      }, size: 16),
+                                      const SizedBox(width: 8),
+                                      Text(switch (mode) {
+                                        ExecutionMode.fullAccess =>
+                                          'Full Access',
+                                        _ => mode.label,
+                                      }, style: const TextStyle(fontSize: 13)),
+                                    ],
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          onExecutionModeChanged(value);
+                        }
+                      },
                     ),
-                  ),
+                  ],
                 )
-                .toList(),
-            onChanged: (value) {
-              if (value != null) {
-                onPermissionModeChanged(value);
-              }
-            },
-          ),
+              : DropdownButtonFormField<PermissionMode>(
+                  key: const ValueKey('dialog_permission_mode'),
+                  initialValue: selectedPermissionMode,
+                  isExpanded: true,
+                  decoration: buildInputDecoration(l.approval),
+                  selectedItemBuilder: (context) => PermissionMode.values
+                      .map(
+                        (mode) => selectedFieldContent(
+                          icon: switch (mode) {
+                            PermissionMode.defaultMode => Icons.tune,
+                            PermissionMode.acceptEdits => Icons.edit_note,
+                            PermissionMode.plan => Icons.assignment_outlined,
+                            PermissionMode.bypassPermissions => Icons.flash_on,
+                          },
+                          title: mode.label,
+                          subtitle: permissionDescription(mode),
+                        ),
+                      )
+                      .toList(),
+                  items: PermissionMode.values.map((mode) {
+                    final description = permissionDescription(mode);
+                    return DropdownMenuItem(
+                      value: mode,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            mode.label,
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                          Text(
+                            description,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                  onChanged: (value) {
+                    if (value == null) return;
+                    switch (value) {
+                      case PermissionMode.defaultMode:
+                        onExecutionModeChanged(ExecutionMode.defaultMode);
+                        onPlanModeChanged(false);
+                        return;
+                      case PermissionMode.acceptEdits:
+                        onExecutionModeChanged(ExecutionMode.acceptEdits);
+                        onPlanModeChanged(false);
+                        return;
+                      case PermissionMode.plan:
+                        onExecutionModeChanged(ExecutionMode.defaultMode);
+                        onPlanModeChanged(true);
+                        return;
+                      case PermissionMode.bypassPermissions:
+                        onExecutionModeChanged(ExecutionMode.fullAccess);
+                        onPlanModeChanged(false);
+                        return;
+                    }
+                  },
+                ),
           const SizedBox(height: 8),
           DropdownButtonFormField<SandboxMode>(
             key: const ValueKey('dialog_sandbox'),
             initialValue: sandboxMode,
+            isExpanded: true,
             decoration: buildInputDecoration(l.sandbox),
+            selectedItemBuilder: (context) =>
+                (provider == Provider.claude
+                        ? SandboxMode.values.reversed
+                        : SandboxMode.values)
+                    .map((m) {
+                      final isClaude = provider == Provider.claude;
+                      final icon = m == SandboxMode.on
+                          ? Icons.shield_outlined
+                          : (isClaude ? Icons.code : Icons.warning_amber);
+                      final label = isClaude
+                          ? (m == SandboxMode.on
+                                ? 'Sandbox (Safe Mode)'
+                                : 'Standard')
+                          : m.label;
+                      return selectedFieldContent(
+                        icon: icon,
+                        title: label,
+                        subtitle: sandboxDescription(m),
+                      );
+                    })
+                    .toList(),
             style: TextStyle(
               fontSize: 13,
               color: Theme.of(context).colorScheme.onSurface,
@@ -1405,74 +1636,48 @@ class _OptionsSection extends StatelessWidget {
             },
           ),
           const SizedBox(height: 8),
-          // Worktree toggle (shared)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FilterChip(
-                  key: const ValueKey('dialog_worktree'),
-                  avatar: useWorktree
-                      ? null
-                      : Icon(
-                          Icons.account_tree_outlined,
-                          size: 16,
-                          color: Theme.of(context).colorScheme.onSurface,
-                        ),
-                  label: Text(
-                    l.worktree,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: useWorktree
-                          ? Theme.of(context).colorScheme.onPrimaryContainer
-                          : Theme.of(context).colorScheme.onSurface,
-                    ),
-                  ),
-                  checkmarkColor: Theme.of(
-                    context,
-                  ).colorScheme.onPrimaryContainer,
-                  selected: useWorktree,
-                  onSelected: onWorktreeToggle,
+          provider == Provider.claude
+              ? _PrimaryClaudeOptions(
+                  buildInputDecoration: buildInputDecoration,
+                  claudeModels: claudeModels,
+                  selectedClaudeModel: selectedClaudeModel,
+                  onClaudeModelChanged: onClaudeModelChanged,
+                  claudeEffort: claudeEffort,
+                  onClaudeEffortChanged: onClaudeEffortChanged,
+                )
+              : _PrimaryCodexOptions(
+                  buildInputDecoration: buildInputDecoration,
+                  codexModels: codexModels,
+                  selectedModel: selectedModel,
+                  onSelectedModelChanged: onSelectedModelChanged,
+                  modelReasoningEffort: modelReasoningEffort,
+                  onModelReasoningEffortChanged: onModelReasoningEffortChanged,
                 ),
-                const SizedBox(width: 8),
-                Tooltip(
-                  message:
-                      'Creates an isolated git working tree for this session.',
-                  child: Icon(
-                    Icons.info_outline,
-                    size: 16,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
+          const SizedBox(height: 8),
+          // Worktree toggle (shared) + inline options when expanded
+          _WorktreeToggleTile(
+            useWorktree: useWorktree,
+            onChanged: onWorktreeToggle,
+            worktreeOptions: useWorktree
+                ? _WorktreeOptions(
+                    appColors: appColors,
+                    worktreeMode: worktreeMode,
+                    onWorktreeModeChanged: onWorktreeModeChanged,
+                    worktrees: worktrees,
+                    selectedWorktree: selectedWorktree,
+                    onWorktreeSelected: onWorktreeSelected,
+                    branchController: branchController,
+                    buildInputDecoration: buildInputDecoration,
+                  )
+                : null,
           ),
-          if (useWorktree) ...[
-            const SizedBox(height: 8),
-            _WorktreeOptions(
-              appColors: appColors,
-              worktreeMode: worktreeMode,
-              onWorktreeModeChanged: onWorktreeModeChanged,
-              worktrees: worktrees,
-              selectedWorktree: selectedWorktree,
-              onWorktreeSelected: onWorktreeSelected,
-              branchController: branchController,
-              buildInputDecoration: buildInputDecoration,
-            ),
-          ],
           // Advanced section (unified for both providers)
           const SizedBox(height: 8),
           _AdvancedOptions(
-            appColors: appColors,
             provider: provider,
             buildInputDecoration: buildInputDecoration,
             // Claude
             claudeModels: claudeModels,
-            selectedClaudeModel: selectedClaudeModel,
-            onClaudeModelChanged: onClaudeModelChanged,
-            claudeEffort: claudeEffort,
-            onClaudeEffortChanged: onClaudeEffortChanged,
             claudeMaxTurnsController: claudeMaxTurnsController,
             maxTurnsError: maxTurnsError,
             onMaxTurnsChanged: onMaxTurnsChanged,
@@ -1486,11 +1691,6 @@ class _OptionsSection extends StatelessWidget {
             claudePersistSession: claudePersistSession,
             onClaudePersistSessionChanged: onClaudePersistSessionChanged,
             // Codex
-            codexModels: codexModels,
-            selectedModel: selectedModel,
-            onSelectedModelChanged: onSelectedModelChanged,
-            modelReasoningEffort: modelReasoningEffort,
-            onModelReasoningEffortChanged: onModelReasoningEffortChanged,
             webSearchMode: webSearchMode,
             onWebSearchModeChanged: onWebSearchModeChanged,
             networkAccessEnabled: networkAccessEnabled,
@@ -1502,8 +1702,266 @@ class _OptionsSection extends StatelessWidget {
   }
 }
 
+class _WorktreeToggleTile extends StatelessWidget {
+  final bool useWorktree;
+  final ValueChanged<bool> onChanged;
+  final Widget? worktreeOptions;
+
+  const _WorktreeToggleTile({
+    required this.useWorktree,
+    required this.onChanged,
+    this.worktreeOptions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    final cs = Theme.of(context).colorScheme;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            key: const ValueKey('dialog_worktree'),
+            borderRadius: worktreeOptions != null
+                ? const BorderRadius.vertical(top: Radius.circular(12))
+                : BorderRadius.circular(12),
+            onTap: () => onChanged(!useWorktree),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.account_tree_outlined,
+                    size: 18,
+                    color: useWorktree ? cs.primary : cs.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      l.worktree,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Tooltip(
+                    message:
+                        'Creates an isolated git working tree for this session.',
+                    child: Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  IgnorePointer(
+                    child: Switch.adaptive(
+                      value: useWorktree,
+                      onChanged: onChanged,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (worktreeOptions != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: worktreeOptions!,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PrimaryClaudeOptions extends StatelessWidget {
+  final InputDecoration Function(
+    String, {
+    String? hintText,
+    Widget? prefixIcon,
+    String? errorText,
+  })
+  buildInputDecoration;
+  final List<String> claudeModels;
+  final String? selectedClaudeModel;
+  final ValueChanged<String?> onClaudeModelChanged;
+  final ClaudeEffort? claudeEffort;
+  final ValueChanged<ClaudeEffort?> onClaudeEffortChanged;
+
+  const _PrimaryClaudeOptions({
+    required this.buildInputDecoration,
+    required this.claudeModels,
+    required this.selectedClaudeModel,
+    required this.onClaudeModelChanged,
+    required this.claudeEffort,
+    required this.onClaudeEffortChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    return _ResponsiveOptionRow(
+      leading: DropdownButtonFormField<String?>(
+        key: const ValueKey('dialog_claude_model'),
+        initialValue: selectedClaudeModel,
+        isExpanded: true,
+        decoration: buildInputDecoration(l.model),
+        style: TextStyle(
+          fontSize: 13,
+          color: Theme.of(context).colorScheme.onSurface,
+        ),
+        items: [
+          DropdownMenuItem<String?>(
+            value: null,
+            child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
+          ),
+          for (final model in claudeModels)
+            DropdownMenuItem<String?>(
+              value: model,
+              child: Text(model, style: const TextStyle(fontSize: 13)),
+            ),
+        ],
+        onChanged: onClaudeModelChanged,
+      ),
+      trailing: DropdownButtonFormField<ClaudeEffort?>(
+        key: const ValueKey('dialog_claude_effort'),
+        initialValue: claudeEffort,
+        isExpanded: true,
+        decoration: buildInputDecoration(l.effort),
+        style: TextStyle(
+          fontSize: 13,
+          color: Theme.of(context).colorScheme.onSurface,
+        ),
+        items: [
+          DropdownMenuItem<ClaudeEffort?>(
+            value: null,
+            child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
+          ),
+          for (final effort in ClaudeEffort.values)
+            DropdownMenuItem<ClaudeEffort?>(
+              value: effort,
+              child: Text(effort.label, style: const TextStyle(fontSize: 13)),
+            ),
+        ],
+        onChanged: onClaudeEffortChanged,
+      ),
+    );
+  }
+}
+
+class _PrimaryCodexOptions extends StatelessWidget {
+  final InputDecoration Function(
+    String, {
+    String? hintText,
+    Widget? prefixIcon,
+    String? errorText,
+  })
+  buildInputDecoration;
+  final List<String> codexModels;
+  final String? selectedModel;
+  final ValueChanged<String?> onSelectedModelChanged;
+  final ReasoningEffort? modelReasoningEffort;
+  final ValueChanged<ReasoningEffort?> onModelReasoningEffortChanged;
+
+  const _PrimaryCodexOptions({
+    required this.buildInputDecoration,
+    required this.codexModels,
+    required this.selectedModel,
+    required this.onSelectedModelChanged,
+    required this.modelReasoningEffort,
+    required this.onModelReasoningEffortChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context);
+    return _ResponsiveOptionRow(
+      leading: DropdownButtonFormField<String?>(
+        key: const ValueKey('dialog_codex_model'),
+        initialValue: selectedModel,
+        isExpanded: true,
+        decoration: buildInputDecoration(l.model),
+        style: TextStyle(
+          fontSize: 13,
+          color: Theme.of(context).colorScheme.onSurface,
+        ),
+        items: [
+          DropdownMenuItem<String?>(
+            value: null,
+            child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
+          ),
+          for (final model in codexModels)
+            DropdownMenuItem<String?>(
+              value: model,
+              child: Text(model, style: const TextStyle(fontSize: 13)),
+            ),
+        ],
+        onChanged: onSelectedModelChanged,
+      ),
+      trailing: DropdownButtonFormField<ReasoningEffort?>(
+        key: const ValueKey('dialog_codex_reasoning_effort'),
+        initialValue: modelReasoningEffort,
+        isExpanded: true,
+        decoration: buildInputDecoration(l.reasoning),
+        style: TextStyle(
+          fontSize: 13,
+          color: Theme.of(context).colorScheme.onSurface,
+        ),
+        items: [
+          DropdownMenuItem<ReasoningEffort?>(
+            value: null,
+            child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
+          ),
+          for (final effort in ReasoningEffort.values)
+            DropdownMenuItem<ReasoningEffort?>(
+              value: effort,
+              child: Text(effort.label, style: const TextStyle(fontSize: 13)),
+            ),
+        ],
+        onChanged: onModelReasoningEffortChanged,
+      ),
+    );
+  }
+}
+
+class _ResponsiveOptionRow extends StatelessWidget {
+  final Widget leading;
+  final Widget trailing;
+
+  const _ResponsiveOptionRow({required this.leading, required this.trailing});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 480) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [leading, const SizedBox(height: 8), trailing],
+          );
+        }
+
+        return Row(
+          children: [
+            Expanded(child: leading),
+            const SizedBox(width: 12),
+            Expanded(child: trailing),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _AdvancedOptions extends StatelessWidget {
-  final AppColors appColors;
   final Provider provider;
   final InputDecoration Function(
     String, {
@@ -1515,10 +1973,6 @@ class _AdvancedOptions extends StatelessWidget {
 
   // Claude
   final List<String> claudeModels;
-  final String? selectedClaudeModel;
-  final ValueChanged<String?> onClaudeModelChanged;
-  final ClaudeEffort? claudeEffort;
-  final ValueChanged<ClaudeEffort?> onClaudeEffortChanged;
   final TextEditingController claudeMaxTurnsController;
   final String? maxTurnsError;
   final VoidCallback onMaxTurnsChanged;
@@ -1533,25 +1987,15 @@ class _AdvancedOptions extends StatelessWidget {
   final ValueChanged<bool> onClaudePersistSessionChanged;
 
   // Codex
-  final List<String> codexModels;
-  final String? selectedModel;
-  final ValueChanged<String?> onSelectedModelChanged;
-  final ReasoningEffort? modelReasoningEffort;
-  final ValueChanged<ReasoningEffort?> onModelReasoningEffortChanged;
   final WebSearchMode? webSearchMode;
   final ValueChanged<WebSearchMode?> onWebSearchModeChanged;
   final bool networkAccessEnabled;
   final ValueChanged<bool> onNetworkAccessChanged;
 
   const _AdvancedOptions({
-    required this.appColors,
     required this.provider,
     required this.buildInputDecoration,
     required this.claudeModels,
-    required this.selectedClaudeModel,
-    required this.onClaudeModelChanged,
-    required this.claudeEffort,
-    required this.onClaudeEffortChanged,
     required this.claudeMaxTurnsController,
     required this.maxTurnsError,
     required this.onMaxTurnsChanged,
@@ -1564,11 +2008,6 @@ class _AdvancedOptions extends StatelessWidget {
     required this.onClaudeForkSessionChanged,
     required this.claudePersistSession,
     required this.onClaudePersistSessionChanged,
-    required this.codexModels,
-    required this.selectedModel,
-    required this.onSelectedModelChanged,
-    required this.modelReasoningEffort,
-    required this.onModelReasoningEffortChanged,
     required this.webSearchMode,
     required this.onWebSearchModeChanged,
     required this.networkAccessEnabled,
@@ -1598,10 +2037,6 @@ class _AdvancedOptions extends StatelessWidget {
             ? _ClaudeAdvancedOptions(
                 buildInputDecoration: buildInputDecoration,
                 claudeModels: claudeModels,
-                selectedClaudeModel: selectedClaudeModel,
-                onClaudeModelChanged: onClaudeModelChanged,
-                claudeEffort: claudeEffort,
-                onClaudeEffortChanged: onClaudeEffortChanged,
                 claudeMaxTurnsController: claudeMaxTurnsController,
                 maxTurnsError: maxTurnsError,
                 onMaxTurnsChanged: onMaxTurnsChanged,
@@ -1617,11 +2052,6 @@ class _AdvancedOptions extends StatelessWidget {
               ).buildChildren(context)
             : _CodexAdvancedOptions(
                 buildInputDecoration: buildInputDecoration,
-                codexModels: codexModels,
-                selectedModel: selectedModel,
-                onSelectedModelChanged: onSelectedModelChanged,
-                modelReasoningEffort: modelReasoningEffort,
-                onModelReasoningEffortChanged: onModelReasoningEffortChanged,
                 webSearchMode: webSearchMode,
                 onWebSearchModeChanged: onWebSearchModeChanged,
                 networkAccessEnabled: networkAccessEnabled,
@@ -1641,10 +2071,6 @@ class _ClaudeAdvancedOptions extends StatelessWidget {
   })
   buildInputDecoration;
   final List<String> claudeModels;
-  final String? selectedClaudeModel;
-  final ValueChanged<String?> onClaudeModelChanged;
-  final ClaudeEffort? claudeEffort;
-  final ValueChanged<ClaudeEffort?> onClaudeEffortChanged;
   final TextEditingController claudeMaxTurnsController;
   final String? maxTurnsError;
   final VoidCallback onMaxTurnsChanged;
@@ -1661,10 +2087,6 @@ class _ClaudeAdvancedOptions extends StatelessWidget {
   const _ClaudeAdvancedOptions({
     required this.buildInputDecoration,
     required this.claudeModels,
-    required this.selectedClaudeModel,
-    required this.onClaudeModelChanged,
-    required this.claudeEffort,
-    required this.onClaudeEffortChanged,
     required this.claudeMaxTurnsController,
     required this.maxTurnsError,
     required this.onMaxTurnsChanged,
@@ -1682,132 +2104,58 @@ class _ClaudeAdvancedOptions extends StatelessWidget {
   List<Widget> buildChildren(BuildContext context) {
     final l = AppLocalizations.of(context);
     return [
-      DropdownButtonFormField<String?>(
-        key: const ValueKey('dialog_claude_model'),
-        initialValue: selectedClaudeModel,
+      TextField(
+        key: const ValueKey('dialog_claude_max_turns'),
+        controller: claudeMaxTurnsController,
+        keyboardType: TextInputType.number,
         decoration: buildInputDecoration(
-          l.modelOptional,
-          prefixIcon: const Icon(Icons.psychology_outlined, size: 18),
+          l.maxTurns,
+          hintText: l.maxTurnsHint,
+          errorText: maxTurnsError,
         ),
-        style: TextStyle(
-          fontSize: 13,
-          color: Theme.of(context).colorScheme.onSurface,
-        ),
-        items: [
-          DropdownMenuItem<String?>(
-            value: null,
-            child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
+        style: const TextStyle(fontSize: 13),
+        onChanged: (_) {
+          onMaxTurnsChanged();
+        },
+      ),
+      const SizedBox(height: 8),
+      _ResponsiveOptionRow(
+        leading: TextField(
+          key: const ValueKey('dialog_claude_max_budget'),
+          controller: claudeMaxBudgetController,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: buildInputDecoration(
+            l.maxBudgetUsd,
+            hintText: l.maxBudgetHint,
+            errorText: maxBudgetError,
           ),
-          for (final model in claudeModels)
+          style: const TextStyle(fontSize: 13),
+          onChanged: (_) {
+            onMaxBudgetChanged();
+          },
+        ),
+        trailing: DropdownButtonFormField<String?>(
+          key: const ValueKey('dialog_claude_fallback_model'),
+          initialValue: selectedClaudeFallbackModel,
+          isExpanded: true,
+          decoration: buildInputDecoration(l.fallbackModel),
+          style: TextStyle(
+            fontSize: 13,
+            color: Theme.of(context).colorScheme.onSurface,
+          ),
+          items: [
             DropdownMenuItem<String?>(
-              value: model,
-              child: Text(model, style: const TextStyle(fontSize: 13)),
+              value: null,
+              child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
             ),
-        ],
-        onChanged: (value) => onClaudeModelChanged(value),
-      ),
-      const SizedBox(height: 8),
-      Row(
-        children: [
-          Expanded(
-            child: DropdownButtonFormField<ClaudeEffort?>(
-              key: const ValueKey('dialog_claude_effort'),
-              initialValue: claudeEffort,
-              decoration: buildInputDecoration(l.effort),
-              style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(context).colorScheme.onSurface,
+            for (final model in claudeModels)
+              DropdownMenuItem<String?>(
+                value: model,
+                child: Text(model, style: const TextStyle(fontSize: 13)),
               ),
-              items: [
-                DropdownMenuItem<ClaudeEffort?>(
-                  value: null,
-                  child: Text(
-                    l.defaultLabel,
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-                for (final effort in ClaudeEffort.values)
-                  DropdownMenuItem<ClaudeEffort?>(
-                    value: effort,
-                    child: Text(
-                      effort.label,
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                  ),
-              ],
-              onChanged: (value) {
-                onClaudeEffortChanged(value);
-              },
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: TextField(
-              key: const ValueKey('dialog_claude_max_turns'),
-              controller: claudeMaxTurnsController,
-              keyboardType: TextInputType.number,
-              decoration: buildInputDecoration(
-                l.maxTurns,
-                hintText: l.maxTurnsHint,
-                errorText: maxTurnsError,
-              ),
-              style: const TextStyle(fontSize: 13),
-              onChanged: (_) {
-                onMaxTurnsChanged();
-              },
-            ),
-          ),
-        ],
-      ),
-      const SizedBox(height: 8),
-      Row(
-        children: [
-          Expanded(
-            child: TextField(
-              key: const ValueKey('dialog_claude_max_budget'),
-              controller: claudeMaxBudgetController,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              decoration: buildInputDecoration(
-                l.maxBudgetUsd,
-                hintText: l.maxBudgetHint,
-                errorText: maxBudgetError,
-              ),
-              style: const TextStyle(fontSize: 13),
-              onChanged: (_) {
-                onMaxBudgetChanged();
-              },
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: DropdownButtonFormField<String?>(
-              key: const ValueKey('dialog_claude_fallback_model'),
-              initialValue: selectedClaudeFallbackModel,
-              decoration: buildInputDecoration(l.fallbackModel),
-              style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-              items: [
-                DropdownMenuItem<String?>(
-                  value: null,
-                  child: Text(
-                    l.defaultLabel,
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-                for (final model in claudeModels)
-                  DropdownMenuItem<String?>(
-                    value: model,
-                    child: Text(model, style: const TextStyle(fontSize: 13)),
-                  ),
-              ],
-              onChanged: (value) => onClaudeFallbackModelChanged(value),
-            ),
-          ),
-        ],
+          ],
+          onChanged: (value) => onClaudeFallbackModelChanged(value),
+        ),
       ),
       const SizedBox(height: 4),
       SwitchListTile(
@@ -1851,11 +2199,6 @@ class _CodexAdvancedOptions extends StatelessWidget {
     String? errorText,
   })
   buildInputDecoration;
-  final List<String> codexModels;
-  final String? selectedModel;
-  final ValueChanged<String?> onSelectedModelChanged;
-  final ReasoningEffort? modelReasoningEffort;
-  final ValueChanged<ReasoningEffort?> onModelReasoningEffortChanged;
   final WebSearchMode? webSearchMode;
   final ValueChanged<WebSearchMode?> onWebSearchModeChanged;
   final bool networkAccessEnabled;
@@ -1863,11 +2206,6 @@ class _CodexAdvancedOptions extends StatelessWidget {
 
   const _CodexAdvancedOptions({
     required this.buildInputDecoration,
-    required this.codexModels,
-    required this.selectedModel,
-    required this.onSelectedModelChanged,
-    required this.modelReasoningEffort,
-    required this.onModelReasoningEffortChanged,
     required this.webSearchMode,
     required this.onWebSearchModeChanged,
     required this.networkAccessEnabled,
@@ -1877,97 +2215,27 @@ class _CodexAdvancedOptions extends StatelessWidget {
   List<Widget> buildChildren(BuildContext context) {
     final l = AppLocalizations.of(context);
     return [
-      DropdownButtonFormField<String?>(
-        key: const ValueKey('dialog_codex_model'),
-        initialValue: selectedModel,
-        decoration: buildInputDecoration(
-          l.model,
-          prefixIcon: const Icon(Icons.psychology_outlined, size: 18),
-        ),
+      DropdownButtonFormField<WebSearchMode?>(
+        key: const ValueKey('dialog_codex_web_search_mode'),
+        initialValue: webSearchMode,
+        isExpanded: true,
+        decoration: buildInputDecoration(l.webSearch),
         style: TextStyle(
           fontSize: 13,
           color: Theme.of(context).colorScheme.onSurface,
         ),
         items: [
-          DropdownMenuItem<String?>(
+          DropdownMenuItem<WebSearchMode?>(
             value: null,
             child: Text(l.defaultLabel, style: const TextStyle(fontSize: 13)),
           ),
-          for (final model in codexModels)
-            DropdownMenuItem<String?>(
-              value: model,
-              child: Text(model, style: const TextStyle(fontSize: 13)),
+          for (final mode in WebSearchMode.values)
+            DropdownMenuItem<WebSearchMode?>(
+              value: mode,
+              child: Text(mode.label, style: const TextStyle(fontSize: 13)),
             ),
         ],
-        onChanged: (value) => onSelectedModelChanged(value),
-      ),
-      const SizedBox(height: 8),
-      Row(
-        children: [
-          Expanded(
-            child: DropdownButtonFormField<ReasoningEffort?>(
-              key: const ValueKey('dialog_codex_reasoning_effort'),
-              initialValue: modelReasoningEffort,
-              decoration: buildInputDecoration(l.reasoning),
-              style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-              items: [
-                DropdownMenuItem<ReasoningEffort?>(
-                  value: null,
-                  child: Text(
-                    l.defaultLabel,
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-                for (final effort in ReasoningEffort.values)
-                  DropdownMenuItem<ReasoningEffort?>(
-                    value: effort,
-                    child: Text(
-                      effort.label,
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                  ),
-              ],
-              onChanged: (value) {
-                onModelReasoningEffortChanged(value);
-              },
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: DropdownButtonFormField<WebSearchMode?>(
-              key: const ValueKey('dialog_codex_web_search_mode'),
-              initialValue: webSearchMode,
-              decoration: buildInputDecoration(l.webSearch),
-              style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-              items: [
-                DropdownMenuItem<WebSearchMode?>(
-                  value: null,
-                  child: Text(
-                    l.defaultLabel,
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ),
-                for (final mode in WebSearchMode.values)
-                  DropdownMenuItem<WebSearchMode?>(
-                    value: mode,
-                    child: Text(
-                      mode.label,
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                  ),
-              ],
-              onChanged: (value) {
-                onWebSearchModeChanged(value);
-              },
-            ),
-          ),
-        ],
+        onChanged: onWebSearchModeChanged,
       ),
       const SizedBox(height: 4),
       SwitchListTile(
@@ -2070,11 +2338,19 @@ class _WorktreeOptions extends StatelessWidget {
           TextField(
             key: const ValueKey('dialog_worktree_branch'),
             controller: branchController,
-            decoration: buildInputDecoration(
-              l.branchOptional,
-              hintText: l.branchHint,
-              prefixIcon: const Icon(Icons.account_tree_outlined, size: 18),
-            ),
+            decoration:
+                buildInputDecoration(
+                  l.branchOptional,
+                  hintText: l.branchHint,
+                  prefixIcon: const Icon(Icons.merge_outlined, size: 18),
+                ).copyWith(
+                  filled: true,
+                  fillColor: Color.lerp(
+                    cs.surfaceContainerHigh,
+                    cs.onSurface,
+                    0.05,
+                  ),
+                ),
             style: const TextStyle(fontSize: 13),
           ),
         // Existing worktree selection
@@ -2216,12 +2492,16 @@ class _SheetActions extends StatelessWidget {
           const SizedBox(width: 12),
           Expanded(
             child: SizedBox(
-              height: 48,
+              height: 54,
               child: FilledButton(
                 key: const ValueKey('dialog_start_button'),
                 style: FilledButton.styleFrom(
                   backgroundColor: canStart ? providerStyle.background : null,
                   foregroundColor: canStart ? providerStyle.foreground : null,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(14),
                   ),
@@ -2236,6 +2516,7 @@ class _SheetActions extends StatelessWidget {
                       style: const TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
+                        height: 1.2,
                       ),
                     ),
                   ],

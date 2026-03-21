@@ -258,9 +258,25 @@ class BridgeService implements BridgeServiceBase {
                 }
                 _taggedMessageController.add((msg, sessionId));
                 _messageController.add(msg);
+              case PermissionResolvedMessage():
+                if (sessionId != null) {
+                  clearSessionPermission(sessionId);
+                }
+                _taggedMessageController.add((msg, sessionId));
+                _messageController.add(msg);
               case SystemMessage(:final permissionMode):
                 if (sessionId != null && permissionMode != null) {
-                  _patchSessionPermissionMode(sessionId, permissionMode);
+                  _patchSessionPermissionMode(
+                    sessionId,
+                    permissionMode,
+                    provider: msg.provider,
+                    executionMode: msg.executionMode,
+                    planMode: msg.planMode,
+                    approvalPolicy: msg.approvalPolicy,
+                  );
+                }
+                if (sessionId != null) {
+                  _patchSessionSystemSettings(sessionId, msg);
                 }
                 _taggedMessageController.add((msg, sessionId));
                 _messageController.add(msg);
@@ -448,6 +464,8 @@ class BridgeService implements BridgeServiceBase {
     String sessionId,
     String projectPath, {
     String? permissionMode,
+    String? executionMode,
+    bool? planMode,
     String? effort,
     int? maxTurns,
     double? maxBudgetUsd,
@@ -466,6 +484,8 @@ class BridgeService implements BridgeServiceBase {
         sessionId,
         projectPath,
         permissionMode: permissionMode,
+        executionMode: executionMode,
+        planMode: planMode,
         effort: effort,
         maxTurns: maxTurns,
         maxBudgetUsd: maxBudgetUsd,
@@ -652,13 +672,96 @@ class BridgeService implements BridgeServiceBase {
     _sessionListController.add(_sessions);
   }
 
-  void _patchSessionPermissionMode(String sessionId, String permissionMode) {
+  void _patchSessionPermissionMode(
+    String sessionId,
+    String permissionMode, {
+    String? provider,
+    String? executionMode,
+    bool? planMode,
+    String? approvalPolicy,
+  }) {
     final idx = _sessions.indexWhere((s) => s.id == sessionId);
     if (idx < 0) return;
     final current = _sessions[idx];
-    if (current.permissionMode == permissionMode) return;
+    _patchSessionModes(
+      sessionId,
+      permissionMode: permissionMode,
+      executionMode:
+          executionModeFromRaw(executionMode)?.value ??
+          deriveExecutionMode(
+            provider: provider ?? current.provider,
+            executionMode: executionMode,
+            permissionMode: permissionMode,
+            approvalPolicy: approvalPolicy ?? current.codexApprovalPolicy,
+          ).value,
+      planMode:
+          planMode ??
+          derivePlanMode(planMode: planMode, permissionMode: permissionMode),
+    );
+  }
+
+  void patchSessionModes(
+    String sessionId, {
+    required String permissionMode,
+    required String executionMode,
+    required bool planMode,
+  }) {
+    _patchSessionModes(
+      sessionId,
+      permissionMode: permissionMode,
+      executionMode: executionMode,
+      planMode: planMode,
+    );
+  }
+
+  void _patchSessionModes(
+    String sessionId, {
+    required String permissionMode,
+    required String executionMode,
+    required bool planMode,
+  }) {
+    final idx = _sessions.indexWhere((s) => s.id == sessionId);
+    if (idx < 0) return;
+    final current = _sessions[idx];
+    if (current.permissionMode == permissionMode &&
+        current.executionMode == executionMode &&
+        current.planMode == planMode) {
+      return;
+    }
     _sessions = List.of(_sessions)
-      ..[idx] = current.copyWith(permissionMode: permissionMode);
+      ..[idx] = current.copyWith(
+        permissionMode: permissionMode,
+        executionMode: executionMode,
+        planMode: planMode,
+      );
+    _sessionListController.add(_sessions);
+  }
+
+  void _patchSessionSystemSettings(String sessionId, SystemMessage message) {
+    final idx = _sessions.indexWhere((s) => s.id == sessionId);
+    if (idx < 0) return;
+    final current = _sessions[idx];
+    final codexModel = sanitizeCodexModelName(message.model);
+    _sessions = List.of(_sessions)
+      ..[idx] = current.copyWith(
+        permissionMode: message.permissionMode ?? current.permissionMode,
+        executionMode: message.executionMode ?? current.executionMode,
+        planMode: message.planMode ?? current.planMode,
+        model: message.provider == Provider.claude.value ? message.model : null,
+        codexApprovalPolicy:
+            message.approvalPolicy ?? current.codexApprovalPolicy,
+        codexSandboxMode: message.provider == Provider.codex.value
+            ? (message.sandboxMode ?? current.codexSandboxMode)
+            : current.codexSandboxMode,
+        codexModel: message.provider == Provider.codex.value
+            ? (codexModel ?? current.codexModel)
+            : current.codexModel,
+        codexModelReasoningEffort:
+            message.modelReasoningEffort ?? current.codexModelReasoningEffort,
+        codexNetworkAccessEnabled:
+            message.networkAccessEnabled ?? current.codexNetworkAccessEnabled,
+        codexWebSearchMode: message.webSearchMode ?? current.codexWebSearchMode,
+      );
     _sessionListController.add(_sessions);
   }
 
@@ -667,16 +770,25 @@ class BridgeService implements BridgeServiceBase {
   void _patchSessionLastMessage(String sessionId, AssistantMessage message) {
     final idx = _sessions.indexWhere((s) => s.id == sessionId);
     if (idx < 0) return;
+    final current = _sessions[idx];
+    final messageModel = sanitizeCodexModelName(message.model) ?? '';
     final text = message.content
         .whereType<TextContent>()
         .map((c) => c.text)
         .join(' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
-    if (text.isEmpty) return;
+    final shouldPatchModel =
+        current.provider == Provider.codex.value &&
+        messageModel.isNotEmpty &&
+        messageModel != current.codexModel;
+    if (text.isEmpty && !shouldPatchModel) return;
     final preview = text.length > 100 ? text.substring(0, 100) : text;
     _sessions = List.of(_sessions)
-      ..[idx] = _sessions[idx].copyWith(lastMessage: preview);
+      ..[idx] = current.copyWith(
+        lastMessage: text.isNotEmpty ? preview : null,
+        codexModel: shouldPatchModel ? messageModel : null,
+      );
     _sessionListController.add(_sessions);
   }
 
@@ -693,6 +805,16 @@ class BridgeService implements BridgeServiceBase {
 
   void patchSessionPermissionMode(String sessionId, String permissionMode) {
     _patchSessionPermissionMode(sessionId, permissionMode);
+  }
+
+  void patchSessionSandboxMode(String sessionId, String sandboxMode) {
+    final idx = _sessions.indexWhere((s) => s.id == sessionId);
+    if (idx < 0) return;
+    final current = _sessions[idx];
+    if (current.codexSandboxMode == sandboxMode) return;
+    _sessions = List.of(_sessions)
+      ..[idx] = current.copyWith(codexSandboxMode: sandboxMode);
+    _sessionListController.add(_sessions);
   }
 
   @override

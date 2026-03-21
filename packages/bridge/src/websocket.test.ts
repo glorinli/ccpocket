@@ -55,6 +55,7 @@ vi.mock("./session.js", () => ({
       pastMessages?: unknown[],
       _worktreeOptions?: unknown,
       provider: "claude" | "codex" = "claude",
+      codexOptions?: unknown,
     ): string {
       const id = `s-${++this.seq}`;
       const process = {
@@ -62,6 +63,7 @@ vi.mock("./session.js", () => ({
         setPermissionMode: vi.fn(async () => {}),
         setApprovalPolicy: vi.fn(),
         setCollaborationMode: vi.fn(),
+        listThreads: vi.fn(async () => ({ data: [], nextCursor: null })),
         sendInput: vi.fn(() => false),
         sendInputWithImage: vi.fn(),
         sendInputWithImages: vi.fn(() => false),
@@ -78,6 +80,8 @@ vi.mock("./session.js", () => ({
         startOptions: options,
         claudeSessionId: options?.sessionId,
         pastMessages,
+        codexOptions,
+        codexSettings: codexOptions,
         history: [],
         status: "idle",
         provider,
@@ -134,6 +138,7 @@ vi.mock("./session.js", () => ({
         setPermissionMode: vi.fn(async () => {}),
         setApprovalPolicy: vi.fn(),
         setCollaborationMode: vi.fn(),
+        listThreads: vi.fn(async () => ({ data: [], nextCursor: null })),
         sendInput: vi.fn(() => false),
         sendInputWithImage: vi.fn(),
         sendInputWithImages: vi.fn(() => false),
@@ -179,6 +184,7 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.unstubAllEnvs();
     httpServer.close();
   });
 
@@ -208,7 +214,6 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
 
     await Promise.resolve();
     await Promise.resolve();
-
     const resumeSends = ws.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
     expect(resumeSends.some((m: any) => m.type === "past_history")).toBe(false);
 
@@ -265,6 +270,44 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     const created = sends.find((m: any) => m.type === "system" && m.subtype === "session_created");
     expect(created).toBeDefined();
     expect(created.provider).toBe("codex");
+
+    bridge.close();
+  });
+
+  it("preserves internal codex sandbox mode on resume_session", async () => {
+    getCodexSessionHistoryMock.mockResolvedValue([
+      {
+        role: "user",
+        content: [{ type: "text", text: "restored codex question" }],
+      },
+    ]);
+
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "resume_session",
+        sessionId: "codex-thread-danger",
+        projectPath: "/tmp/project-codex",
+        provider: "codex",
+        sandboxMode: "danger-full-access",
+      },
+      ws,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const session = (bridge as any).sessionManager.get("s-1");
+    expect(session.codexOptions?.sandboxMode).toBe("danger-full-access");
+
+    const sends = ws.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const created = sends.find((m: any) => m.type === "system" && m.subtype === "session_created");
+    expect(created?.sandboxMode).toBe("off");
 
     bridge.close();
   });
@@ -355,7 +398,51 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     bridge.close();
   });
 
-  it("maps set_permission_mode plan to collaborationMode for codex session (restart)", async () => {
+  it("maps set_permission_mode plan to collaborationMode for codex session in-place when idle", async () => {
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "start",
+        projectPath: "/tmp/project-codex",
+        provider: "codex",
+      },
+      ws,
+    );
+    await Promise.resolve();
+
+    const sends = ws.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const created = sends.find((m: any) => m.type === "system" && m.subtype === "session_created");
+    expect(created).toBeDefined();
+    const sessionId = created.sessionId as string;
+
+    const session = (bridge as any).sessionManager.get(sessionId);
+    expect(session).toBeDefined();
+    session.status = "idle";
+    (session.process as any).setApprovalPolicy("on-request");
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "set_permission_mode",
+        sessionId,
+        mode: "plan",
+      },
+      ws,
+    );
+
+    const updatedSession = (bridge as any).sessionManager.get(sessionId);
+    expect(updatedSession).toBeDefined();
+    expect(updatedSession.id).toBe(sessionId);
+    expect((bridge as any).sessionManager.list()).toHaveLength(1);
+
+    bridge.close();
+  });
+
+  it("maps set_permission_mode plan to collaborationMode for codex session with restart when active", async () => {
     const bridge = new BridgeWebSocketServer({ server: httpServer });
     const ws = {
       readyState: OPEN_STATE,
@@ -377,8 +464,9 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     expect(created).toBeDefined();
     const oldSessionId = created.sessionId as string;
 
-    // Old session should exist before permission mode change
-    expect((bridge as any).sessionManager.get(oldSessionId)).toBeDefined();
+    const oldSession = (bridge as any).sessionManager.get(oldSessionId);
+    expect(oldSession).toBeDefined();
+    oldSession.status = "running";
 
     (bridge as any).handleClientMessage(
       {
@@ -389,16 +477,12 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
       ws,
     );
 
-    // Codex permission mode change triggers a session restart:
-    // The old session is destroyed and a new one is created.
     expect((bridge as any).sessionManager.get(oldSessionId)).toBeUndefined();
 
-    // A new session should exist with the correct collaboration mode
     const sessions = (bridge as any).sessionManager.list();
     expect(sessions).toHaveLength(1);
-    const newSession = sessions[0];
-    expect(newSession.id).not.toBe(oldSessionId);
-    expect(newSession.provider).toBe("codex");
+    expect(sessions[0].id).not.toBe(oldSessionId);
+    expect(sessions[0].provider).toBe("codex");
 
     bridge.close();
   });
@@ -439,6 +523,57 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     const errors = lastMessages.filter((m: any) => m.type === "error");
     // No errors should be produced for valid permission mode on codex
     expect(errors.length).toBe(0);
+
+    bridge.close();
+  });
+
+  it("includes explicit execution and plan modes when codex sandbox change recreates session", async () => {
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "start",
+        projectPath: "/tmp/project-codex",
+        provider: "codex",
+        executionMode: "fullAccess",
+        planMode: true,
+      },
+      ws,
+    );
+    await Promise.resolve();
+
+    const initialMessages = ws.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const created = initialMessages.find((m: any) => m.type === "system" && m.subtype === "session_created");
+    expect(created).toBeDefined();
+    const oldSessionId = created.sessionId as string;
+    const session = (bridge as any).sessionManager.get(oldSessionId);
+    session.process.approvalPolicy = "never";
+    session.process.collaborationMode = "plan";
+
+    const buildSessionCreatedMessageSpy = vi.spyOn(
+      bridge as any,
+      "buildSessionCreatedMessage",
+    );
+    ws.send.mockClear();
+    (bridge as any).handleClientMessage(
+      {
+        type: "set_sandbox_mode",
+        sessionId: oldSessionId,
+        sandboxMode: "off",
+      },
+      ws,
+    );
+
+    const params = buildSessionCreatedMessageSpy.mock.calls.at(-1)?.[0];
+    expect(params).toBeDefined();
+    expect(params.executionMode).toBe("fullAccess");
+    expect(params.planMode).toBe(true);
+    expect(params.permissionMode).toBe("plan");
+    expect(params.sandboxMode).toBe("off");
 
     bridge.close();
   });
@@ -491,6 +626,60 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     expect(last).toEqual({
       type: "error",
       message: "No active session.",
+    });
+
+    bridge.close();
+  });
+
+  it("can force set_permission_mode failure for testing", () => {
+    vi.stubEnv("BRIDGE_FAIL_SET_PERMISSION_MODE", "1");
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "set_permission_mode",
+        sessionId: "s-1",
+        mode: "plan",
+      },
+      ws,
+    );
+
+    const last = JSON.parse(ws.send.mock.calls.at(-1)?.[0] as string);
+    expect(last).toEqual({
+      type: "error",
+      message: "Failed to set permission mode: forced test failure",
+      errorCode: "set_permission_mode_rejected",
+    });
+
+    bridge.close();
+  });
+
+  it("can force set_sandbox_mode failure for testing", () => {
+    vi.stubEnv("BRIDGE_FAIL_SET_SANDBOX_MODE", "1");
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "set_sandbox_mode",
+        sessionId: "s-1",
+        sandboxMode: "off",
+      },
+      ws,
+    );
+
+    const last = JSON.parse(ws.send.mock.calls.at(-1)?.[0] as string);
+    expect(last).toEqual({
+      type: "error",
+      message: "Failed to set sandbox mode: forced test failure",
+      errorCode: "set_sandbox_mode_rejected",
     });
 
     bridge.close();
@@ -958,6 +1147,157 @@ describe("BridgeWebSocketServer resume/get_history flow", () => {
     );
     expect(rewindCreated).toBeDefined();
     expect(rewindCreated.sourceSessionId).toBe(sessionId);
+
+    bridge.close();
+  });
+
+  it("uses active codex thread/list for codex recent sessions", async () => {
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const ws = {
+      readyState: OPEN_STATE,
+      send: vi.fn(),
+    } as any;
+
+    (bridge as any).handleClientMessage(
+      {
+        type: "start",
+        projectPath: "/tmp/project-codex",
+        provider: "codex",
+      },
+      ws,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const created = ws.send.mock.calls
+      .map((c: unknown[]) => JSON.parse(c[0] as string))
+      .find((m: any) => m.type === "system" && m.subtype === "session_created");
+    const session = (bridge as any).sessionManager.get(created.sessionId);
+    session.process.listThreads.mockResolvedValue({
+      data: [
+        {
+          id: "thr_codex_1",
+          preview: "Investigate crash",
+          createdAt: 1771492643,
+          updatedAt: 1771496243,
+          cwd: "/tmp/project-codex",
+          agentNickname: "Atlas",
+          agentRole: "explorer",
+          gitBranch: "feat/protocol",
+          name: "Crash triage",
+        },
+      ],
+      nextCursor: null,
+    });
+    getAllRecentSessionsMock.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: "thr_codex_1",
+          provider: "codex",
+          projectPath: "/tmp/project-codex",
+          firstPrompt: "Investigate crash",
+          created: "2026-02-19T10:10:43.000Z",
+          modified: "2026-02-19T11:10:43.000Z",
+          gitBranch: "feat/protocol",
+          isSidechain: false,
+          codexSettings: {
+            approvalPolicy: "never",
+            sandboxMode: "danger-full-access",
+            model: "gpt-5.3-codex",
+          },
+          resumeCwd: "/tmp/project-codex-worktree",
+        },
+      ],
+      hasMore: false,
+    });
+
+    const payload = await (bridge as any).listRecentCodexThreads(
+      {
+        type: "list_recent_sessions",
+        provider: "codex",
+        projectPath: "/tmp/project-codex",
+      },
+    );
+
+    expect(session.process.listThreads).toHaveBeenCalledWith({
+      limit: 20,
+      cwd: "/tmp/project-codex",
+      searchTerm: undefined,
+    });
+    expect(getAllRecentSessionsMock).toHaveBeenCalledWith({
+      provider: "codex",
+      projectPath: "/tmp/project-codex",
+      archivedSessionIds: expect.any(Set),
+    });
+    expect(payload.sessions).toHaveLength(1);
+    expect(payload.sessions[0]).toMatchObject({
+      provider: "codex",
+      sessionId: "thr_codex_1",
+      name: "Crash triage",
+      agentNickname: "Atlas",
+      agentRole: "explorer",
+      gitBranch: "feat/protocol",
+      projectPath: "/tmp/project-codex",
+      resumeCwd: "/tmp/project-codex-worktree",
+      codexSettings: {
+        approvalPolicy: "never",
+        sandboxMode: "danger-full-access",
+        model: "gpt-5.3-codex",
+      },
+    });
+
+    bridge.close();
+  });
+
+  it("uses standalone codex app-server for codex recent sessions when no active session exists", async () => {
+    const bridge = new BridgeWebSocketServer({ server: httpServer });
+    const stop = vi.fn();
+
+    (bridge as any).createStandaloneCodexProcess = vi.fn(async () => ({
+      listThreads: vi.fn(async () => ({
+        data: [
+          {
+            id: "thr_codex_2",
+            preview: "Review failing tests",
+            createdAt: 1771492643,
+            updatedAt: 1771496243,
+            cwd: "/tmp/project-codex",
+            agentNickname: null,
+            agentRole: null,
+            gitBranch: "fix/tests",
+            name: "Test failures",
+          },
+        ],
+        nextCursor: null,
+      })),
+      stop,
+    }));
+
+    const payload = await (bridge as any).listRecentCodexThreads(
+      {
+        type: "list_recent_sessions",
+        provider: "codex",
+        projectPath: "/tmp/project-codex",
+      },
+    );
+
+    expect((bridge as any).createStandaloneCodexProcess).toHaveBeenCalledWith(
+      "/tmp/project-codex",
+    );
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(getAllRecentSessionsMock).toHaveBeenCalledWith({
+      provider: "codex",
+      projectPath: "/tmp/project-codex",
+      archivedSessionIds: expect.any(Set),
+    });
+    expect(payload.sessions[0]).toMatchObject({
+      provider: "codex",
+      sessionId: "thr_codex_2",
+      name: "Test failures",
+      gitBranch: "fix/tests",
+      projectPath: "/tmp/project-codex",
+    });
 
     bridge.close();
   });

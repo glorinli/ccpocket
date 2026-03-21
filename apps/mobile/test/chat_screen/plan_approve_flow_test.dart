@@ -60,7 +60,7 @@ void main() {
 
       // Now approval bar should show normal tool approval (not plan)
       expect($(ApprovalBar), findsOneWidget);
-      expect(find.text('Approve'), findsOneWidget);
+      expect(find.text('Allow Once'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('approve_always_button')),
         findsOneWidget,
@@ -69,6 +69,7 @@ void main() {
       // ExitPlanMode approval should stop plan-mode UI immediately.
       final statusLine2 = $.tester.widget<StatusLine>(find.byType(StatusLine));
       expect(statusLine2.inPlanMode, isFalse);
+      expect(find.text('Plan Off'), findsOneWidget);
     });
 
     patrolWidgetTest('J2: Plan reject with feedback triggers re-plan cycle', (

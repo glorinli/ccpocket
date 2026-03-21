@@ -7,8 +7,8 @@ import { promisify } from "node:util";
 import { WebSocketServer, WebSocket } from "ws";
 import { SessionManager, type SessionInfo } from "./session.js";
 import { SdkProcess } from "./sdk-process.js";
-import type { CodexProcess } from "./codex-process.js";
-import { parseClientMessage, type ClientMessage, type DebugTraceEvent, type ImageChange, type ServerMessage } from "./parser.js";
+import { CodexProcess, type CodexThreadSummary } from "./codex-process.js";
+import { parseClientMessage, type ClientMessage, type DebugTraceEvent, type ImageChange, type Provider, type ServerMessage } from "./parser.js";
 import { getAllRecentSessions, getCodexSessionHistory, getSessionHistory, findSessionsByClaudeIds, extractMessageImages, getClaudeSessionName, loadCodexSessionNames, renameClaudeSession, renameCodexSession } from "./sessions-index.js";
 import type { ImageStore } from "./image-store.js";
 import type { GalleryStore } from "./gallery-store.js";
@@ -26,6 +26,7 @@ import { fetchAllUsage } from "./usage.js";
 import type { PromptHistoryBackupStore } from "./prompt-history-backup.js";
 import { getPackageVersion } from "./version.js";
 
+type SystemServerMessage = Extract<ServerMessage, { type: "system" }>;
 
 // ---- Available model lists (delivered to clients via session_list) ----
 
@@ -38,6 +39,7 @@ const CLAUDE_MODELS: string[] = [
 
 const CODEX_MODELS: string[] = [
   "gpt-5.4",
+  "gpt-5.4-mini",
   "gpt-5.3-codex",
   "gpt-5.3-codex-spark",
   "gpt-5.2-codex",
@@ -53,11 +55,68 @@ function permissionModeToApprovalPolicy(
   return mode === "bypassPermissions" ? "never" : "on-request";
 }
 
+function deriveExecutionMode(params: {
+  permissionMode?: string;
+  executionMode?: string;
+  approvalPolicy?: string;
+  provider?: Provider;
+}): "default" | "acceptEdits" | "fullAccess" {
+  if (params.executionMode === "default" ||
+      params.executionMode === "acceptEdits" ||
+      params.executionMode === "fullAccess") {
+    return params.executionMode;
+  }
+  if (params.permissionMode === "bypassPermissions" ||
+      params.approvalPolicy === "never") {
+    return "fullAccess";
+  }
+  if (params.permissionMode === "acceptEdits") {
+    return params.provider === "codex" ? "default" : "acceptEdits";
+  }
+  return "default";
+}
+
+function derivePlanMode(params: {
+  permissionMode?: string;
+  planMode?: boolean;
+  collaborationMode?: "plan" | "default";
+}): boolean {
+  return params.planMode ??
+      ((params.permissionMode === "plan") ||
+          (params.collaborationMode === "plan"));
+}
+
+function modesToLegacyPermissionMode(
+  provider: Provider,
+  executionMode: "default" | "acceptEdits" | "fullAccess",
+  planMode: boolean,
+): "default" | "acceptEdits" | "bypassPermissions" | "plan" {
+  if (planMode) return "plan";
+  switch (executionMode) {
+    case "fullAccess":
+      return "bypassPermissions";
+    case "acceptEdits":
+      return "acceptEdits";
+    case "default":
+    default:
+      return provider === "codex" ? "acceptEdits" : "default";
+  }
+}
+
 /** Map simplified SandboxMode (on/off) to Codex internal sandbox mode. */
 function sandboxModeToInternal(
   mode?: string,
-): "workspace-write" | "danger-full-access" {
-  return mode === "off" ? "danger-full-access" : "workspace-write";
+): "read-only" | "workspace-write" | "danger-full-access" {
+  switch (mode) {
+    case "danger-full-access":
+    case "workspace-write":
+    case "read-only":
+      return mode;
+    case "off":
+      return "danger-full-access";
+    default:
+      return "workspace-write";
+  }
 }
 
 /** Map Codex internal sandbox mode back to simplified on/off for clients. */
@@ -65,6 +124,37 @@ function sandboxModeToExternal(
   mode?: string,
 ): "on" | "off" {
   return mode === "danger-full-access" ? "off" : "on";
+}
+
+function threadTimestampToIso(value: number): string {
+  return value > 0 ? new Date(value * 1000).toISOString() : "";
+}
+
+function envFlagEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function codexThreadToRecentSession(
+  thread: CodexThreadSummary,
+  indexed?: { codexSettings?: Record<string, unknown>; resumeCwd?: string },
+): Record<string, unknown> {
+  return {
+    sessionId: thread.id,
+    provider: "codex",
+    ...(thread.name ? { name: thread.name } : {}),
+    ...(thread.agentNickname ? { agentNickname: thread.agentNickname } : {}),
+    ...(thread.agentRole ? { agentRole: thread.agentRole } : {}),
+    summary: thread.preview || undefined,
+    firstPrompt: thread.preview || "",
+    created: threadTimestampToIso(thread.createdAt),
+    modified: threadTimestampToIso(thread.updatedAt),
+    gitBranch: thread.gitBranch ?? "",
+    projectPath: thread.cwd,
+    ...(indexed?.resumeCwd ? { resumeCwd: indexed.resumeCwd } : {}),
+    isSidechain: false,
+    ...(indexed?.codexSettings ? { codexSettings: indexed.codexSettings } : {}),
+  };
 }
 
 export interface BridgeServerOptions {
@@ -104,6 +194,8 @@ export class BridgeWebSocketServer {
   /** FCM token → push notification locale */
   private tokenLocales = new Map<string, PushLocale>();
   private tokenPrivacyMode = new Map<string, boolean>();
+  private failSetPermissionMode = envFlagEnabled("BRIDGE_FAIL_SET_PERMISSION_MODE");
+  private failSetSandboxMode = envFlagEnabled("BRIDGE_FAIL_SET_SANDBOX_MODE");
 
   constructor(options: BridgeServerOptions) {
     const { server, apiKey, allowedDirs, imageStore, galleryStore, projectHistory, debugTraceStore, recordingStore, firebaseAuth, promptHistoryBackup } = options;
@@ -199,6 +291,123 @@ export class BridgeWebSocketServer {
     };
   }
 
+  private buildSessionCreatedMessage(params: {
+    sessionId: string;
+    provider: Provider;
+    projectPath: string;
+    session?: SessionInfo;
+    permissionMode?: string;
+    executionMode?: string;
+    planMode?: boolean;
+    sandboxMode?: string;
+    slashCommands?: string[];
+    skills?: string[];
+    skillMetadata?: Array<Record<string, unknown>>;
+    sourceSessionId?: string;
+  }): SystemServerMessage {
+    const {
+      sessionId,
+      provider,
+      projectPath,
+      session,
+      permissionMode,
+      executionMode,
+      planMode,
+      sandboxMode,
+      slashCommands,
+      skills,
+      skillMetadata,
+      sourceSessionId,
+    } = params;
+
+    const msg: SystemServerMessage = {
+      type: "system",
+      subtype: "session_created",
+      sessionId,
+      provider,
+      projectPath,
+      ...(permissionMode ? { permissionMode: permissionMode as "default" | "acceptEdits" | "bypassPermissions" | "plan" } : {}),
+      ...((executionMode ?? (session?.process instanceof SdkProcess
+              ? session.process.permissionMode === "bypassPermissions"
+                ? "fullAccess"
+                : session.process.permissionMode === "acceptEdits"
+                  ? "acceptEdits"
+                  : "default"
+              : session?.process instanceof CodexProcess
+                ? session.process.approvalPolicy === "never"
+                  ? "fullAccess"
+                  : "default"
+                : undefined))
+          ? {
+              executionMode: (executionMode ?? (session?.process instanceof SdkProcess
+                      ? session.process.permissionMode === "bypassPermissions"
+                        ? "fullAccess"
+                        : session.process.permissionMode === "acceptEdits"
+                          ? "acceptEdits"
+                          : "default"
+                      : session?.process instanceof CodexProcess
+                        ? session.process.approvalPolicy === "never"
+                          ? "fullAccess"
+                          : "default"
+                        : undefined)) as "default" | "acceptEdits" | "fullAccess",
+            }
+          : {}),
+      ...((planMode ??
+              (session?.process instanceof SdkProcess
+                  ? session.process.permissionMode === "plan"
+                  : session?.process instanceof CodexProcess
+                    ? session.process.collaborationMode === "plan"
+                    : undefined)) !=
+          null
+          ? {
+              planMode:
+                  planMode ??
+                  (session?.process instanceof SdkProcess
+                      ? session.process.permissionMode === "plan"
+                      : session?.process instanceof CodexProcess
+                        ? session.process.collaborationMode === "plan"
+                        : false),
+            }
+          : {}),
+      ...(sandboxMode ? { sandboxMode } : {}),
+      ...(slashCommands ? { slashCommands } : {}),
+      ...(skills ? { skills } : {}),
+      ...(skillMetadata
+        ? {
+            skillMetadata:
+              skillMetadata as SystemServerMessage["skillMetadata"],
+          }
+        : {}),
+      ...(session?.worktreePath
+        ? {
+            worktreePath: session.worktreePath,
+            worktreeBranch: session.worktreeBranch,
+          }
+        : {}),
+      ...(sourceSessionId ? { sourceSessionId } : {}),
+    };
+
+    if (provider === "codex" && session?.codexSettings) {
+      if (session.codexSettings.model !== undefined) {
+        msg.model = session.codexSettings.model;
+      }
+      if (session.codexSettings.approvalPolicy !== undefined) {
+        msg.approvalPolicy = session.codexSettings.approvalPolicy;
+      }
+      if (session.codexSettings.modelReasoningEffort !== undefined) {
+        msg.modelReasoningEffort = session.codexSettings.modelReasoningEffort;
+      }
+      if (session.codexSettings.networkAccessEnabled !== undefined) {
+        msg.networkAccessEnabled = session.codexSettings.networkAccessEnabled;
+      }
+      if (session.codexSettings.webSearchMode !== undefined) {
+        msg.webSearchMode = session.codexSettings.webSearchMode;
+      }
+    }
+
+    return msg;
+  }
+
   close(): void {
     console.log("[ws] Shutting down...");
     this.sessionManager.destroyAll();
@@ -275,8 +484,22 @@ export class BridgeWebSocketServer {
         }
         try {
           const provider = msg.provider ?? "claude";
+          const executionMode = deriveExecutionMode({
+            provider,
+            permissionMode: msg.permissionMode,
+            executionMode: msg.executionMode,
+          });
+          const planMode = derivePlanMode({
+            permissionMode: msg.permissionMode,
+            planMode: msg.planMode,
+          });
+          const legacyPermissionMode = modesToLegacyPermissionMode(
+            provider,
+            executionMode,
+            planMode,
+          );
           if (provider === "codex") {
-            console.log(`[ws] start(codex): permissionMode=${msg.permissionMode} → collaboration=${msg.permissionMode === "plan" ? "plan" : "default"}`);
+            console.log(`[ws] start(codex): execution=${executionMode} plan=${planMode}`);
           }
           const cached = provider === "claude" ? this.sessionManager.getCachedCommands(msg.projectPath) : undefined;
           const sessionId = this.sessionManager.create(
@@ -284,7 +507,7 @@ export class BridgeWebSocketServer {
             {
               sessionId: msg.sessionId,
               continueMode: msg.continue,
-              permissionMode: msg.permissionMode,
+              permissionMode: legacyPermissionMode,
               model: msg.model,
               effort: msg.effort,
               maxTurns: msg.maxTurns,
@@ -306,14 +529,14 @@ export class BridgeWebSocketServer {
             provider,
             provider === "codex"
               ? {
-                  approvalPolicy: permissionModeToApprovalPolicy(msg.permissionMode),
+                  approvalPolicy: executionMode === "fullAccess" ? "never" : "on-request",
                   sandboxMode: sandboxModeToInternal(msg.sandboxMode),
                   model: msg.model,
                   modelReasoningEffort: (msg.modelReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh") ?? undefined,
                   networkAccessEnabled: msg.networkAccessEnabled,
                   webSearchMode: (msg.webSearchMode as "disabled" | "cached" | "live") ?? undefined,
                   threadId: msg.sessionId,
-                  collaborationMode: msg.permissionMode === "plan" ? "plan" as const : "default" as const,
+                  collaborationMode: planMode ? "plan" as const : "default" as const,
                 }
               : undefined,
           );
@@ -321,20 +544,28 @@ export class BridgeWebSocketServer {
 
           // Load saved session name from CLI storage (for resumed sessions)
           void this.loadAndSetSessionName(createdSession, provider, msg.projectPath, msg.sessionId).then(() => {
-            this.send(ws, {
-              type: "system",
-              subtype: "session_created",
-              sessionId,
-              provider,
-              projectPath: msg.projectPath,
-              ...(msg.permissionMode ? { permissionMode: msg.permissionMode } : {}),
-              ...(msg.sandboxMode ? { sandboxMode: msg.sandboxMode } : {}),
-              ...(cached ? { slashCommands: cached.slashCommands, skills: cached.skills, ...(cached.skillMetadata ? { skillMetadata: cached.skillMetadata } : {}) } : {}),
-              ...(createdSession?.worktreePath ? {
-                worktreePath: createdSession.worktreePath,
-                worktreeBranch: createdSession.worktreeBranch,
-              } : {}),
-            });
+            this.send(
+              ws,
+              this.buildSessionCreatedMessage({
+                sessionId,
+                provider,
+                projectPath: msg.projectPath,
+                session: createdSession,
+                permissionMode: legacyPermissionMode,
+                executionMode,
+                planMode,
+                sandboxMode: msg.sandboxMode,
+                ...(cached
+                  ? {
+                      slashCommands: cached.slashCommands,
+                      skills: cached.skills,
+                      ...(cached.skillMetadata
+                        ? { skillMetadata: cached.skillMetadata }
+                        : {}),
+                    }
+                  : {}),
+              }),
+            );
             this.broadcastSessionList();
             // Send a gentle tip when the project is not a git repository
             if (createdSession && !createdSession.gitBranch) {
@@ -558,6 +789,14 @@ export class BridgeWebSocketServer {
       }
 
       case "set_permission_mode": {
+        if (this.failSetPermissionMode) {
+          this.send(ws, {
+            type: "error",
+            message: "Failed to set permission mode: forced test failure",
+            errorCode: "set_permission_mode_rejected",
+          });
+          break;
+        }
         const session = this.resolveSession(msg.sessionId);
         if (!session) {
           this.send(ws, { type: "error", message: "No active session." });
@@ -567,14 +806,60 @@ export class BridgeWebSocketServer {
           // Permission mode for Codex requires a session restart (like sandbox mode).
           // approvalPolicy and collaborationMode are thread-level settings that
           // only take effect reliably at thread/start or thread/resume time.
-          const newApproval = permissionModeToApprovalPolicy(msg.mode);
-          const newCollaboration: "plan" | "default" = msg.mode === "plan" ? "plan" : "default";
+          const executionMode = deriveExecutionMode({
+            provider: "codex",
+            permissionMode: msg.mode,
+            executionMode: msg.executionMode,
+          });
+          const planMode = derivePlanMode({
+            permissionMode: msg.mode,
+            planMode: msg.planMode,
+          });
+          const legacyPermissionMode = modesToLegacyPermissionMode(
+            "codex",
+            executionMode,
+            planMode,
+          );
+          const newApproval: "never" | "on-request" =
+            executionMode === "fullAccess" ? "never" : "on-request";
+          const newCollaboration: "plan" | "default" = planMode ? "plan" : "default";
           const currentApproval = (session.process as CodexProcess).approvalPolicy;
           const currentCollaboration = (session.process as CodexProcess).collaborationMode;
           if (newApproval === currentApproval && newCollaboration === currentCollaboration) {
             break; // No change needed
           }
-          console.log(`[ws] set_permission_mode(codex): mode=${msg.mode} → approval=${newApproval}, collaboration=${newCollaboration} (restart)`);
+          const canApplyModeInPlace = session.status === "idle";
+
+          if (canApplyModeInPlace) {
+            const process = session.process as CodexProcess;
+            if (newApproval !== currentApproval) {
+              process.setApprovalPolicy(newApproval);
+            }
+            if (newCollaboration !== currentCollaboration) {
+              process.setCollaborationMode(newCollaboration);
+            }
+            session.lastActivityAt = new Date();
+            this.broadcast({
+              type: "system",
+              subtype: "set_permission_mode",
+              sessionId: session.id,
+              permissionMode: legacyPermissionMode,
+              executionMode,
+              planMode,
+            });
+            this.broadcastSessionList();
+            this.recordDebugEvent(session.id, {
+              direction: "internal" as const,
+              channel: "bridge" as const,
+              type: "permission_mode_changed",
+              detail: `mode=${msg.mode} approval=${newApproval} collaboration=${newCollaboration} applied=in-place`,
+            });
+            console.log(
+              `[ws] set_permission_mode(codex): execution=${executionMode} plan=${planMode} → approval=${newApproval}, collaboration=${newCollaboration} (in-place)`,
+            );
+            break;
+          }
+          console.log(`[ws] set_permission_mode(codex): execution=${executionMode} plan=${planMode} → approval=${newApproval}, collaboration=${newCollaboration} (restart)`);
 
           const oldSessionId = session.id;
           const threadId = session.claudeSessionId;
@@ -609,17 +894,21 @@ export class BridgeWebSocketServer {
             );
             const newSession = this.sessionManager.get(newId);
             if (newSession && sessionName) newSession.name = sessionName;
-            this.broadcast({
-              type: "system",
-              subtype: "session_created",
-              sessionId: newId,
-              provider: "codex",
-              projectPath,
-              permissionMode: msg.mode,
-              ...(oldSettings.sandboxMode ? { sandboxMode: sandboxModeToExternal(oldSettings.sandboxMode) } : {}),
-              sourceSessionId: oldSessionId,
-              ...(newSession?.worktreePath ? { worktreePath: newSession.worktreePath, worktreeBranch: newSession.worktreeBranch } : {}),
-            });
+            this.broadcast(
+              this.buildSessionCreatedMessage({
+                sessionId: newId,
+                provider: "codex",
+                projectPath,
+                session: newSession,
+                permissionMode: legacyPermissionMode,
+                executionMode,
+                planMode,
+                sandboxMode: oldSettings.sandboxMode
+                  ? sandboxModeToExternal(oldSettings.sandboxMode)
+                  : undefined,
+                sourceSessionId: oldSessionId,
+              }),
+            );
             this.broadcastSessionList();
             console.log(`[ws] Permission mode change (no thread): created new session ${newId} (mode=${msg.mode})`);
             break;
@@ -664,20 +953,21 @@ export class BridgeWebSocketServer {
             }
 
             void this.loadAndSetSessionName(newSession, "codex", effectiveProjectPath, threadId).then(() => {
-              this.broadcast({
-                type: "system",
-                subtype: "session_created",
-                sessionId: newId,
-                provider: "codex",
-                projectPath: effectiveProjectPath,
-                permissionMode: msg.mode,
-                ...(oldSettings.sandboxMode ? { sandboxMode: sandboxModeToExternal(oldSettings.sandboxMode) } : {}),
-                sourceSessionId: oldSessionId,
-                ...(newSession?.worktreePath ? {
-                  worktreePath: newSession.worktreePath,
-                  worktreeBranch: newSession.worktreeBranch,
-                } : {}),
-              });
+              this.broadcast(
+                this.buildSessionCreatedMessage({
+                  sessionId: newId,
+                  provider: "codex",
+                  projectPath: effectiveProjectPath,
+                  session: newSession,
+                  permissionMode: legacyPermissionMode,
+                  executionMode,
+                  planMode,
+                  sandboxMode: oldSettings.sandboxMode
+                    ? sandboxModeToExternal(oldSettings.sandboxMode)
+                    : undefined,
+                  sourceSessionId: oldSessionId,
+                }),
+              );
               this.broadcastSessionList();
             });
 
@@ -704,6 +994,14 @@ export class BridgeWebSocketServer {
       }
 
       case "set_sandbox_mode": {
+        if (this.failSetSandboxMode) {
+          this.send(ws, {
+            type: "error",
+            message: "Failed to set sandbox mode: forced test failure",
+            errorCode: "set_sandbox_mode_rejected",
+          });
+          break;
+        }
         const session = this.resolveSession(msg.sessionId);
         if (!session) {
           this.send(ws, { type: "error", message: "No active session." });
@@ -751,19 +1049,16 @@ export class BridgeWebSocketServer {
           if (newSession && sessionName) newSession.name = sessionName;
 
           void this.loadAndSetSessionName(newSession, "claude", projectPath, claudeSessionId).then(() => {
-            this.broadcast({
-              type: "system",
-              subtype: "session_created",
-              sessionId: newId,
-              provider: "claude",
-              projectPath,
-              sandboxMode: msg.sandboxMode,
-              sourceSessionId: oldSessionId,
-              ...(newSession?.worktreePath ? {
-                worktreePath: newSession.worktreePath,
-                worktreeBranch: newSession.worktreeBranch,
-              } : {}),
-            });
+            this.broadcast(
+              this.buildSessionCreatedMessage({
+                sessionId: newId,
+                provider: "claude",
+                projectPath,
+                session: newSession,
+                sandboxMode: msg.sandboxMode,
+                sourceSessionId: oldSessionId,
+              }),
+            );
             this.broadcastSessionList();
           });
 
@@ -797,6 +1092,13 @@ export class BridgeWebSocketServer {
         const worktreeBranch = session.worktreeBranch;
         const sessionName = session.name;
         const collaborationMode = (session.process as CodexProcess).collaborationMode;
+        const executionMode = oldSettings.approvalPolicy === "never" ? "fullAccess" : "default";
+        const planMode = collaborationMode === "plan";
+        const legacyPermissionMode = modesToLegacyPermissionMode(
+          "codex",
+          executionMode,
+          planMode,
+        );
 
         this.sessionManager.destroy(oldSessionId);
         console.log(`[ws] Sandbox mode change: destroyed session ${oldSessionId}`);
@@ -831,16 +1133,19 @@ export class BridgeWebSocketServer {
           );
           const newSession = this.sessionManager.get(newId);
           if (newSession && sessionName) newSession.name = sessionName;
-          this.broadcast({
-            type: "system",
-            subtype: "session_created",
-            sessionId: newId,
-            provider: "codex",
-            projectPath,
-            sandboxMode: sandboxModeToExternal(newSandboxMode),
-            sourceSessionId: oldSessionId,
-            ...(newSession?.worktreePath ? { worktreePath: newSession.worktreePath, worktreeBranch: newSession.worktreeBranch } : {}),
-          });
+          this.broadcast(
+            this.buildSessionCreatedMessage({
+              sessionId: newId,
+              provider: "codex",
+              projectPath,
+              session: newSession,
+              permissionMode: legacyPermissionMode,
+              executionMode,
+              planMode,
+              sandboxMode: sandboxModeToExternal(newSandboxMode),
+              sourceSessionId: oldSessionId,
+            }),
+          );
           this.broadcastSessionList();
           console.log(`[ws] Sandbox mode change (no thread): created new session ${newId} (sandbox=${newSandboxMode})`);
           break;
@@ -886,19 +1191,19 @@ export class BridgeWebSocketServer {
           }
 
           void this.loadAndSetSessionName(newSession, "codex", effectiveProjectPath, threadId).then(() => {
-            this.broadcast({
-              type: "system",
-              subtype: "session_created",
-              sessionId: newId,
-              provider: "codex",
-              projectPath: effectiveProjectPath,
-              sandboxMode: sandboxModeToExternal(newSandboxMode),
-              sourceSessionId: oldSessionId,
-              ...(newSession?.worktreePath ? {
-                worktreePath: newSession.worktreePath,
-                worktreeBranch: newSession.worktreeBranch,
-              } : {}),
-            });
+            this.broadcast(
+              this.buildSessionCreatedMessage({
+                sessionId: newId,
+                provider: "codex",
+                projectPath: effectiveProjectPath,
+                session: newSession,
+                permissionMode: legacyPermissionMode,
+                executionMode,
+                planMode,
+                sandboxMode: sandboxModeToExternal(newSandboxMode),
+                sourceSessionId: oldSessionId,
+              }),
+            );
             this.broadcastSessionList();
           });
 
@@ -971,16 +1276,15 @@ export class BridgeWebSocketServer {
 
           // Notify all clients. Broadcast is used so reconnecting clients also receive it.
           const newSession = this.sessionManager.get(newId);
-          this.broadcast({
-            type: "system",
-            subtype: "session_created",
+          const createdMsg = this.buildSessionCreatedMessage({
             sessionId: newId,
             provider: newSession?.provider ?? "claude",
             projectPath,
-            ...(permissionMode ? { permissionMode } : {}),
-            clearContext: true,
+            session: newSession,
+            permissionMode,
             sourceSessionId: sessionId,
           });
+          this.broadcast({ ...createdMsg, clearContext: true });
           this.broadcastSessionList();
         } else {
           sdkProc.approve(msg.id, msg.updatedInput);
@@ -1189,15 +1493,7 @@ export class BridgeWebSocketServer {
 
       case "list_recent_sessions": {
         const requestId = ++this.recentSessionsRequestId;
-        getAllRecentSessions({
-          limit: msg.limit,
-          offset: msg.offset,
-          projectPath: msg.projectPath,
-          provider: msg.provider,
-          namedOnly: msg.namedOnly,
-          searchQuery: msg.searchQuery,
-          archivedSessionIds: this.archiveStore.archivedIds(),
-        }).then(({ sessions, hasMore }) => {
+        this.listRecentSessions(msg).then(({ sessions, hasMore }) => {
           // Drop stale responses when rapid filter switches cause out-of-order completion
           if (requestId !== this.recentSessionsRequestId) return;
           this.send(ws, { type: "recent_sessions", sessions, hasMore } as Record<string, unknown>);
@@ -1248,6 +1544,20 @@ export class BridgeWebSocketServer {
           break;
         }
         const provider = msg.provider ?? "claude";
+        const executionMode = deriveExecutionMode({
+          provider,
+          permissionMode: msg.permissionMode,
+          executionMode: msg.executionMode,
+        });
+        const planMode = derivePlanMode({
+          permissionMode: msg.permissionMode,
+          planMode: msg.planMode,
+        });
+        const legacyPermissionMode = modesToLegacyPermissionMode(
+          provider,
+          executionMode,
+          planMode,
+        );
         const sessionRefId = msg.sessionId;
         // Resume flow: keep past history in SessionInfo and deliver it only
         // via get_history(sessionId) to avoid duplicate/missed replay races.
@@ -1278,30 +1588,32 @@ export class BridgeWebSocketServer {
               "codex",
               {
                 threadId: sessionRefId,
-                approvalPolicy: permissionModeToApprovalPolicy(msg.permissionMode),
+                approvalPolicy: executionMode === "fullAccess" ? "never" : "on-request",
                 sandboxMode: sandboxModeToInternal(msg.sandboxMode),
                 model: msg.model,
                 modelReasoningEffort: (msg.modelReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh") ?? undefined,
                 networkAccessEnabled: msg.networkAccessEnabled,
                 webSearchMode: (msg.webSearchMode as "disabled" | "cached" | "live") ?? undefined,
-                collaborationMode: msg.permissionMode === "plan" ? "plan" as const : "default" as const,
+                collaborationMode: planMode ? "plan" as const : "default" as const,
               },
             );
             const createdSession = this.sessionManager.get(sessionId);
             void this.loadAndSetSessionName(createdSession, "codex", effectiveProjectPath, sessionRefId).then(() => {
-              this.send(ws, {
-                type: "system",
-                subtype: "session_created",
-                sessionId,
-                provider: "codex",
-                projectPath: effectiveProjectPath,
-                ...(createdSession?.codexSettings?.sandboxMode ? { sandboxMode: sandboxModeToExternal(createdSession.codexSettings.sandboxMode) } : {}),
-                ...(msg.permissionMode ? { permissionMode: msg.permissionMode } : {}),
-                ...(createdSession?.worktreePath ? {
-                  worktreePath: createdSession.worktreePath,
-                  worktreeBranch: createdSession.worktreeBranch,
-                } : {}),
-              });
+              this.send(
+                ws,
+                this.buildSessionCreatedMessage({
+                  sessionId,
+                  provider: "codex",
+                  projectPath: effectiveProjectPath,
+                  session: createdSession,
+                  sandboxMode: createdSession?.codexSettings?.sandboxMode
+                    ? sandboxModeToExternal(createdSession.codexSettings.sandboxMode)
+                    : undefined,
+                  permissionMode: legacyPermissionMode,
+                  executionMode,
+                  planMode,
+                }),
+              );
               this.broadcastSessionList();
             });
             this.debugEvents.set(sessionId, []);
@@ -1342,7 +1654,7 @@ export class BridgeWebSocketServer {
             msg.projectPath,
             {
               sessionId: claudeSessionId,
-              permissionMode: msg.permissionMode,
+              permissionMode: legacyPermissionMode,
               model: msg.model,
               effort: msg.effort,
               maxTurns: msg.maxTurns,
@@ -1358,19 +1670,26 @@ export class BridgeWebSocketServer {
           const createdSession = this.sessionManager.get(sessionId);
           void this.loadAndSetSessionName(createdSession, "claude", msg.projectPath, claudeSessionId).then(() => {
             this.send(ws, {
-              type: "system",
-              subtype: "session_created",
-              sessionId,
+              ...this.buildSessionCreatedMessage({
+                sessionId,
+                provider: "claude",
+                projectPath: msg.projectPath,
+                session: createdSession,
+                permissionMode: legacyPermissionMode,
+                executionMode,
+                planMode,
+                sandboxMode: msg.sandboxMode,
+                ...(cached
+                  ? {
+                      slashCommands: cached.slashCommands,
+                      skills: cached.skills,
+                      ...(cached.skillMetadata
+                        ? { skillMetadata: cached.skillMetadata }
+                        : {}),
+                    }
+                  : {}),
+              }),
               claudeSessionId,
-              provider: "claude",
-              projectPath: msg.projectPath,
-              ...(msg.permissionMode ? { permissionMode: msg.permissionMode } : {}),
-              ...(msg.sandboxMode ? { sandboxMode: msg.sandboxMode } : {}),
-              ...(cached ? { slashCommands: cached.slashCommands, skills: cached.skills, ...(cached.skillMetadata ? { skillMetadata: cached.skillMetadata } : {}) } : {}),
-              ...(createdSession?.worktreePath ? {
-                worktreePath: createdSession.worktreePath,
-                worktreeBranch: createdSession.worktreeBranch,
-              } : {}),
             });
             this.broadcastSessionList();
           });
@@ -1683,15 +2002,17 @@ export class BridgeWebSocketServer {
               // Notify the new session ID
               const newSession = this.sessionManager.get(newSessionId);
               const rewindPermMode = newSession?.process instanceof SdkProcess ? newSession.process.permissionMode : undefined;
-              this.send(ws, {
-                type: "system",
-                subtype: "session_created",
-                sessionId: newSessionId,
-                provider: newSession?.provider ?? "claude",
-                projectPath: newSession?.projectPath ?? "",
-                ...(rewindPermMode ? { permissionMode: rewindPermMode } : {}),
-                sourceSessionId: msg.sessionId,
-              });
+              this.send(
+                ws,
+                this.buildSessionCreatedMessage({
+                  sessionId: newSessionId,
+                  provider: newSession?.provider ?? "claude",
+                  projectPath: newSession?.projectPath ?? "",
+                  session: newSession,
+                  permissionMode: rewindPermMode,
+                  sourceSessionId: msg.sessionId,
+                }),
+              );
               this.sendSessionList(ws);
             });
           } catch (err) {
@@ -1709,15 +2030,17 @@ export class BridgeWebSocketServer {
                 this.send(ws, { type: "rewind_result", success: true, mode: "both" });
                 const newSession = this.sessionManager.get(newSessionId);
                 const rewindPermMode2 = newSession?.process instanceof SdkProcess ? newSession.process.permissionMode : undefined;
-                this.send(ws, {
-                  type: "system",
-                  subtype: "session_created",
-                  sessionId: newSessionId,
-                  provider: newSession?.provider ?? "claude",
-                  projectPath: newSession?.projectPath ?? "",
-                  ...(rewindPermMode2 ? { permissionMode: rewindPermMode2 } : {}),
-                  sourceSessionId: msg.sessionId,
-                });
+                this.send(
+                  ws,
+                  this.buildSessionCreatedMessage({
+                    sessionId: newSessionId,
+                    provider: newSession?.provider ?? "claude",
+                    projectPath: newSession?.projectPath ?? "",
+                    session: newSession,
+                    permissionMode: rewindPermMode2,
+                    sourceSessionId: msg.sessionId,
+                  }),
+                );
                 this.sendSessionList(ws);
               });
             } catch (err) {
@@ -1997,6 +2320,86 @@ export class BridgeWebSocketServer {
         client.send(data);
       }
     }
+  }
+
+  private async listRecentSessions(
+    msg: Extract<ClientMessage, { type: "list_recent_sessions" }>,
+  ): Promise<{ sessions: unknown[]; hasMore: boolean }> {
+    if (msg.provider === "codex") {
+      try {
+        return await this.listRecentCodexThreads(msg);
+      } catch (err) {
+        console.warn(`[ws] Codex thread/list failed, falling back to rollout scan: ${err}`);
+      }
+    }
+
+    return getAllRecentSessions({
+      limit: msg.limit,
+      offset: msg.offset,
+      projectPath: msg.projectPath,
+      provider: msg.provider,
+      namedOnly: msg.namedOnly,
+      searchQuery: msg.searchQuery,
+      archivedSessionIds: this.archiveStore.archivedIds(),
+    });
+  }
+
+  private getActiveCodexProcess(): CodexProcess | null {
+    const summary = this.sessionManager.list().find((session) => session.provider === "codex");
+    if (!summary) return null;
+    const session = this.sessionManager.get(summary.id);
+    return session?.provider === "codex" ? session.process as CodexProcess : null;
+  }
+
+  private async listRecentCodexThreads(
+    msg: Extract<ClientMessage, { type: "list_recent_sessions" }>,
+  ): Promise<{ sessions: unknown[]; hasMore: boolean }> {
+    const limit = msg.limit ?? 20;
+    const offset = msg.offset ?? 0;
+    const process = this.getActiveCodexProcess() ?? await this.createStandaloneCodexProcess(msg.projectPath);
+    const isStandalone = process !== this.getActiveCodexProcess();
+
+    try {
+      const result = await process.listThreads({
+        limit: limit + offset,
+        cwd: msg.projectPath,
+        searchTerm: msg.searchQuery,
+      });
+      const archivedIds = this.archiveStore.archivedIds();
+      const indexedSessions = await getAllRecentSessions({
+        provider: "codex",
+        projectPath: msg.projectPath,
+        archivedSessionIds: archivedIds,
+      });
+      const indexedById = new Map(
+        indexedSessions.sessions.map((session) => [
+          session.sessionId,
+          {
+            codexSettings: session.codexSettings,
+            resumeCwd: session.resumeCwd,
+          },
+        ]),
+      );
+      const sessions = result.data
+        .filter((thread) => !archivedIds.has(thread.id))
+        .filter((thread) => !msg.namedOnly || !!thread.name)
+        .slice(offset, offset + limit)
+        .map((thread) => codexThreadToRecentSession(thread, indexedById.get(thread.id)));
+      return {
+        sessions,
+        hasMore: result.nextCursor != null,
+      };
+    } finally {
+      if (isStandalone) {
+        process.stop();
+      }
+    }
+  }
+
+  private async createStandaloneCodexProcess(projectPath?: string): Promise<CodexProcess> {
+    const proc = new CodexProcess();
+    await proc.initializeOnly(projectPath ?? process.cwd());
+    return proc;
   }
 
   /** Extract a short project label from the full projectPath (last directory name). */

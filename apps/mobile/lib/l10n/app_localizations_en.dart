@@ -144,6 +144,15 @@ class AppLocalizationsEn extends AppLocalizations {
   String get startNewWithSameSettings => 'Start New with Same Settings';
 
   @override
+  String get copyResumeCommand => 'Copy Resume Command';
+
+  @override
+  String get copyResumeCommandSubtitle => 'Hand off to macOS / Linux';
+
+  @override
+  String get resumeCommandCopied => 'Resume command copied';
+
+  @override
   String get editSettingsThenStart => 'Edit Settings Then Start';
 
   @override
@@ -284,6 +293,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get approval => 'Approval';
 
   @override
+  String get restart => 'Restart';
+
+  @override
   String get worktree => 'Worktree';
 
   @override
@@ -352,7 +364,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get branchOptional => 'Branch (optional)';
 
   @override
-  String get branchHint => 'ccpocket/<auto>';
+  String get branchHint => 'feature/...';
 
   @override
   String get noExistingWorktrees => 'No existing worktrees';
@@ -400,6 +412,88 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get always => 'Always';
+
+  @override
+  String get approveOnce => 'Allow Once';
+
+  @override
+  String get approveForSession => 'Allow for This Session';
+
+  @override
+  String get permissionDefaultDescription => 'Standard permission prompts';
+
+  @override
+  String get permissionAcceptEditsDescription => 'Auto-approve file edits';
+
+  @override
+  String get permissionPlanDescription =>
+      'Analyze and plan before executing changes';
+
+  @override
+  String get permissionBypassDescription => 'Run without most approval prompts';
+
+  @override
+  String get executionDefaultDescription => 'Standard permission prompts';
+
+  @override
+  String get executionAcceptEditsDescription => 'Auto-approve file edits';
+
+  @override
+  String get executionFullAccessDescription =>
+      'Run without most approval prompts';
+
+  @override
+  String get codexPlanModeDescription =>
+      'Draft a plan first, then wait for approval before executing';
+
+  @override
+  String get sandboxRestrictedDescription =>
+      'Run commands in restricted environment';
+
+  @override
+  String get sandboxNativeDescription => 'Run commands natively';
+
+  @override
+  String get sandboxNativeCautionDescription =>
+      'Run commands natively (CAUTION)';
+
+  @override
+  String get changePermissionModeTitle => 'Change Permission Mode';
+
+  @override
+  String changePermissionModeBody(String mode) {
+    return 'Switching to $mode will restart the session. Your conversation will be preserved.';
+  }
+
+  @override
+  String get changeExecutionModeTitle => 'Change Execution Mode';
+
+  @override
+  String changeExecutionModeBody(String mode) {
+    return 'Switching to $mode will restart the session. Your conversation will be preserved.';
+  }
+
+  @override
+  String get enablePlanModeTitle => 'Enable Plan Mode';
+
+  @override
+  String get disablePlanModeTitle => 'Disable Plan Mode';
+
+  @override
+  String get enablePlanModeBody =>
+      'Enabling Plan Mode will restart the session. Your conversation will be preserved.';
+
+  @override
+  String get disablePlanModeBody =>
+      'Disabling Plan Mode will restart the session. Your conversation will be preserved.';
+
+  @override
+  String get changeSandboxModeTitle => 'Change Sandbox Mode';
+
+  @override
+  String changeSandboxModeBody(String mode) {
+    return 'Switching to $mode will restart the session. Your conversation will be preserved.';
+  }
 
   @override
   String get messagePlaceholder => 'Message Claude...';
@@ -599,7 +693,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get guideBridgePrereq2 =>
-      'Claude Code CLI or Codex CLI\n(either one is fine)';
+      'Codex CLI or Claude Code CLI\n(either one is fine)';
 
   @override
   String get guideBridgeStep1 => 'Run with npx (recommended)';
@@ -1164,13 +1258,48 @@ class AppLocalizationsEn extends AppLocalizations {
   String get showLess => 'Show less';
 
   @override
+  String get authErrorTitle => 'Claude login required';
+
+  @override
+  String get authErrorBody =>
+      'Claude Code needs to sign in again on the Bridge machine.';
+
+  @override
+  String get authErrorPrimaryCommandLabel => 'Step 1';
+
+  @override
+  String get authErrorSecondaryCommandLabel => 'Step 2';
+
+  @override
+  String get authErrorAlternativeLabel => 'Shell alternative';
+
+  @override
+  String get apiKeyRequiredTitle => 'API key required';
+
+  @override
+  String get apiKeyRequiredBody =>
+      'Subscription-based authentication is currently restricted due to Anthropic policy concerns. Please use an API key instead.';
+
+  @override
+  String get apiKeyRequiredHint => 'Get your API key at:';
+
+  @override
   String get authHelpTitle => 'Auth Troubleshooting';
 
   @override
-  String get authHelpFetchError => 'Failed to load help guide';
+  String get authHelpFetchError => 'Failed to load the troubleshooting guide';
 
   @override
-  String get authHelpButton => 'Help';
+  String get authHelpButton => 'View steps';
+
+  @override
+  String get authHelpLanguageJa => '日本語';
+
+  @override
+  String get authHelpLanguageEn => 'English';
+
+  @override
+  String get authHelpLanguageZhHans => 'Simplified Chinese';
 
   @override
   String get terminalApp => 'Terminal App';
@@ -1207,11 +1336,11 @@ class AppLocalizationsEn extends AppLocalizations {
   String get terminalAppNotInstalled => 'Could not open terminal app';
 
   @override
-  String get terminalAppExperimental => 'Experimental';
+  String get terminalAppExperimental => 'Preview';
 
   @override
   String get terminalAppExperimentalNote =>
-      'This feature is experimental. Presets may not work with all apps or configurations. Contributions for new presets are welcome on GitHub!';
+      'This feature is in preview. Presets may not work with all apps or configurations. Contributions for new presets are welcome on GitHub!';
 
   @override
   String get sectionSpread => 'ENJOYING CC POCKET?';

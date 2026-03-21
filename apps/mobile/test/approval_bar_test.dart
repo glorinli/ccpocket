@@ -65,9 +65,37 @@ void main() {
 
       expect(find.text('Bash'), findsOneWidget);
       expect(find.text('ls -la'), findsOneWidget);
-      expect(find.text('Approve'), findsOneWidget);
+      expect(find.text('Allow Once'), findsOneWidget);
       expect(find.text('Reject'), findsOneWidget);
-      expect(find.text('Always'), findsOneWidget);
+      expect(find.text('Allow for This Session'), findsOneWidget);
+    });
+
+    testWidgets('shows granular approval detail lines', (tester) async {
+      await tester.pumpWidget(
+        buildSubject(
+          pendingPermission: const PermissionRequestMessage(
+            toolUseId: 'tu-1',
+            toolName: 'Bash',
+            input: {
+              'command': 'curl https://example.com',
+              'additionalPermissions': {
+                'fileSystem': {
+                  'write': ['/tmp/project'],
+                },
+              },
+              'proposedExecpolicyAmendment': {'mode': 'allow'},
+              'availableDecisions': ['accept', 'decline'],
+            },
+          ),
+        ),
+      );
+
+      expect(
+        find.text('Additional permissions: fileSystem.write=/tmp/project'),
+        findsOneWidget,
+      );
+      expect(find.text('Exec policy: mode=allow'), findsOneWidget);
+      expect(find.text('Allowed actions: accept, decline'), findsOneWidget);
     });
 
     testWidgets('shows plan approval labels', (tester) async {
@@ -85,8 +113,8 @@ void main() {
       expect(find.text('Plan Approval'), findsOneWidget);
       expect(find.text('Accept Plan'), findsOneWidget);
       expect(find.text('Keep Planning'), findsOneWidget);
-      // "Always" hidden for plan approval
-      expect(find.text('Always'), findsNothing);
+      // Session-only approval is hidden for plan approval
+      expect(find.text('Allow for This Session'), findsNothing);
     });
 
     testWidgets('codex plan approval hides keep planning and clear action', (

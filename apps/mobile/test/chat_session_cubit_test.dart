@@ -85,9 +85,10 @@ void main() {
     mockBridge.dispose();
   });
 
-  ChatSessionCubit createCubit(String sessionId) {
+  ChatSessionCubit createCubit(String sessionId, {Provider? provider}) {
     return ChatSessionCubit(
       sessionId: sessionId,
+      provider: provider,
       bridge: mockBridge,
       streamingCubit: streamingCubit,
     );
@@ -117,6 +118,66 @@ void main() {
 
       expect(cubit.state.status, ProcessStatus.running);
     });
+
+    test(
+      'codex explicit execution mode wins over legacy permission mode',
+      () async {
+        final cubit = createCubit('s1', provider: Provider.codex);
+        addTearDown(cubit.close);
+        await Future.microtask(() {});
+
+        mockBridge.emitMessage(
+          const SystemMessage(
+            subtype: 'set_permission_mode',
+            provider: 'codex',
+            permissionMode: 'acceptEdits',
+            executionMode: 'default',
+            planMode: false,
+          ),
+          sessionId: 's1',
+        );
+        await Future.microtask(() {});
+
+        expect(cubit.state.executionMode, ExecutionMode.defaultMode);
+        expect(cubit.state.planMode, isFalse);
+      },
+    );
+
+    test(
+      'codex sandbox-only system message does not reset execution mode',
+      () async {
+        final cubit = createCubit('s1', provider: Provider.codex);
+        addTearDown(cubit.close);
+        await Future.microtask(() {});
+
+        mockBridge.emitMessage(
+          const SystemMessage(
+            subtype: 'set_permission_mode',
+            provider: 'codex',
+            permissionMode: 'bypassPermissions',
+            executionMode: 'fullAccess',
+            planMode: false,
+          ),
+          sessionId: 's1',
+        );
+        await Future.microtask(() {});
+
+        expect(cubit.state.executionMode, ExecutionMode.fullAccess);
+
+        mockBridge.emitMessage(
+          const SystemMessage(
+            subtype: 'session_created',
+            provider: 'codex',
+            sandboxMode: 'off',
+          ),
+          sessionId: 's1',
+        );
+        await Future.microtask(() {});
+
+        expect(cubit.state.executionMode, ExecutionMode.fullAccess);
+        expect(cubit.state.planMode, isFalse);
+      },
+    );
 
     test('permission request sets approval state', () async {
       final cubit = createCubit('s1');
@@ -170,6 +231,41 @@ void main() {
 
       expect(cubit.state.approval, isA<ApprovalNone>());
       expect(mockBridge.sentMessages, hasLength(1));
+    });
+
+    test('approving ExitPlanMode also clears plan mode state', () async {
+      final cubit = createCubit('s1', provider: Provider.codex);
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+
+      mockBridge.emitMessage(
+        const SystemMessage(
+          subtype: 'set_permission_mode',
+          provider: 'codex',
+          permissionMode: 'plan',
+          executionMode: 'default',
+          planMode: true,
+        ),
+        sessionId: 's1',
+      );
+      mockBridge.emitMessage(
+        const PermissionRequestMessage(
+          toolUseId: 'tool-plan',
+          toolName: 'ExitPlanMode',
+          input: {'plan': 'Test plan'},
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+      await Future<void>.delayed(Duration.zero);
+
+      expect(cubit.state.planMode, isTrue);
+      expect(cubit.state.approval, isA<ApprovalPermission>());
+      cubit.approve('tool-plan');
+
+      expect(cubit.state.planMode, isFalse);
+      expect(cubit.state.inPlanMode, isFalse);
+      expect(cubit.state.permissionMode, PermissionMode.acceptEdits);
     });
 
     test('approving ExitPlanMode clears inPlanMode immediately', () async {
@@ -247,6 +343,47 @@ void main() {
       cubit.setPermissionMode(PermissionMode.defaultMode);
       expect(cubit.state.permissionMode, PermissionMode.defaultMode);
       expect(cubit.state.inPlanMode, isFalse);
+    });
+
+    test('permission mode rolls back on mode-change error', () async {
+      final cubit = createCubit('s1');
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+
+      cubit.setPermissionMode(PermissionMode.bypassPermissions);
+      expect(cubit.state.permissionMode, PermissionMode.bypassPermissions);
+
+      mockBridge.emitMessage(
+        const ErrorMessage(
+          message: 'Failed to set permission mode: forced test failure',
+          errorCode: 'set_permission_mode_rejected',
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+
+      expect(cubit.state.permissionMode, PermissionMode.defaultMode);
+      expect(cubit.state.inPlanMode, isFalse);
+    });
+
+    test('sandbox mode rolls back on mode-change error', () async {
+      final cubit = createCubit('s1');
+      addTearDown(cubit.close);
+      await Future.microtask(() {});
+
+      cubit.setSandboxMode(SandboxMode.on);
+      expect(cubit.state.sandboxMode, SandboxMode.on);
+
+      mockBridge.emitMessage(
+        const ErrorMessage(
+          message: 'Failed to set sandbox mode: forced test failure',
+          errorCode: 'set_sandbox_mode_rejected',
+        ),
+        sessionId: 's1',
+      );
+      await Future.microtask(() {});
+
+      expect(cubit.state.sandboxMode, SandboxMode.off);
     });
 
     test('history message adds entries', () async {

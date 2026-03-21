@@ -2,6 +2,45 @@
 
 All notable changes to `@ccpocket/bridge` will be documented in this file.
 
+## [1.26.0] - 2026-03-19
+
+### Added
+- Codex approval protocol support (catch up app-server approval flow)
+- Codex sub-agent session metadata display
+- Codex dynamic tool call normalization
+- Codex thread list for recent sessions (stored threads without active sessions)
+- Simplified Chinese (zh-CN) localization support
+
+### Changed
+- Deprecated all npm package versions older than `1.25.0` for new installs due to potential Anthropic policy concerns around OAuth-based usage
+
+### Fixed
+- Restore MCP images in Codex session history
+- Preserve Codex sandbox mode on session resume
+- Restore Codex recent session settings correctly
+
+## [1.25.0] - 2026-03-19
+
+### Changed
+- Subscription-based (OAuth) authentication is temporarily disabled pending Anthropic policy clarification. API key (`ANTHROPIC_API_KEY`) is now required
+
+### Fixed
+- Prevent false auth error detection on long assistant messages containing auth-related keywords
+
+## [1.24.0] - 2026-03-19
+
+### Changed
+- Claude usage tracking is now opt-in (set `BRIDGE_ENABLE_USAGE=1` to enable). No direct Anthropic API calls by default
+
+## [1.23.0] - 2026-03-18
+
+### Added
+- Add `gpt-5.4-mini` to available Codex model list
+- Graceful degradation for unsupported Bridge message types with per-action client fallback handling
+
+### Changed
+- Doctor check no longer requires unused `codex-sdk`, and skips `systemd` checks on macOS
+
 ## [1.22.1] - 2026-03-17
 
 ### Fixed

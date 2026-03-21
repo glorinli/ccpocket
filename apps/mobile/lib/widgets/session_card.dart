@@ -7,7 +7,9 @@ import '../theme/app_theme.dart';
 import '../theme/provider_style.dart';
 import '../utils/command_parser.dart';
 import '../utils/request_user_input.dart';
+import 'codex_environment_summary.dart';
 import 'plan_detail_sheet.dart';
+import 'expandable_summary_text.dart';
 import 'session_visual_status.dart';
 
 /// Shared layout constant for AskUserArea buttons.
@@ -95,7 +97,8 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
     final appColors = Theme.of(context).extension<AppColors>()!;
     final visualStatus = sessionVisualStatusFor(
       rawStatus: session.status,
-      permissionMode: session.permissionMode,
+      permissionMode: session.effectivePermissionMode,
+      planMode: session.resolvedPlanMode,
       pendingPermission: session.pendingPermission,
     );
     final isReadyUnseen =
@@ -125,17 +128,13 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
     final provider = providerFromRaw(session.provider);
     final providerStyle = providerStyleFor(context, provider);
     final elapsed = _formatElapsed(session.lastActivityAt);
+    final agentLabel = _formatAgentLabel(
+      session.agentNickname,
+      session.agentRole,
+    );
     final displayMessage = formatCommandText(
       session.lastMessage.replaceAll(RegExp(r'\s+'), ' ').trim(),
     );
-    final settingsSummary = _buildSettingsSummary(
-      isCodex: session.provider == 'codex',
-      model: session.provider == 'codex' ? session.codexModel : session.model,
-      sandboxMode: session.codexSandboxMode,
-      approvalPolicy: session.codexApprovalPolicy,
-      permissionMode: session.permissionMode,
-    );
-
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 0),
       clipBehavior: Clip.antiAlias,
@@ -214,7 +213,8 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                             onReject: () =>
                                 widget.onReject?.call(permission.toolUseId),
                           )
-                        : permission.toolName == 'AskUserQuestion' &&
+                        : (permission.toolName == 'AskUserQuestion' ||
+                                  permission.toolName == 'McpElicitation') &&
                               !isRequestUserInputApproval
                         ? _AskUserArea(
                             permission: permission,
@@ -261,7 +261,7 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                             },
                           ))
                   : switch (permission.toolName) {
-                      'AskUserQuestion'
+                      'AskUserQuestion' || 'McpElicitation'
                           when !permission.isRequestUserInputApproval =>
                         _AskUserArea(
                           permission: permission,
@@ -432,6 +432,10 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                       ),
                     ],
                   ),
+                  if (agentLabel != null) ...[
+                    const SizedBox(height: 8),
+                    _AgentLabel(label: agentLabel),
+                  ],
                   // Last message
                   if (displayMessage.isNotEmpty) ...[
                     const SizedBox(height: 4),
@@ -443,12 +447,36 @@ class _RunningSessionCardState extends State<RunningSessionCard> {
                     ),
                   ],
                   const SizedBox(height: 4),
-                  Text(
-                    settingsSummary,
-                    style: TextStyle(fontSize: 11, color: appColors.subtleText),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  if (isCodexSession)
+                    CodexEnvironmentSummary(
+                      leadingLabel:
+                          (session.status == 'running' ||
+                                  session.status == 'starting') &&
+                              session.resolvedPlanMode
+                          ? 'Planning'
+                          : null,
+                      model: session.codexModel,
+                      reasoningEffort: session.codexModelReasoningEffort,
+                      executionMode: session.resolvedExecutionMode.value,
+                      sandboxMode: session.codexSandboxMode,
+                      showDefaultReasoning: true,
+                      compact: true,
+                    )
+                  else
+                    Text(
+                      _buildSettingsSummary(
+                        isCodex: false,
+                        model: session.model,
+                        executionMode: session.resolvedExecutionMode.value,
+                        planMode: session.resolvedPlanMode,
+                      ),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: appColors.subtleText,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   // Meta Row: branch + worktree (left) + elapsed (right)
                   const SizedBox(height: 4),
                   Row(
@@ -552,8 +580,8 @@ class _ToolApprovalArea extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            permission.summary,
+          ExpandableSummaryText(
+            text: permission.summary,
             style: TextStyle(
               fontSize: 12,
               fontFamily: 'monospace',
@@ -561,8 +589,7 @@ class _ToolApprovalArea extends StatelessWidget {
                 context,
               ).colorScheme.onSurface.withValues(alpha: 0.8),
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+            maxLines: 2,
           ),
           const SizedBox(height: 6),
           Row(
@@ -573,7 +600,20 @@ class _ToolApprovalArea extends StatelessWidget {
                 child: OutlinedButton.icon(
                   onPressed: onReject,
                   icon: const Icon(Icons.close, size: 14),
-                  label: const Text('Reject'),
+                  label: Text(AppLocalizations.of(context).reject),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    textStyle: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 28,
+                child: OutlinedButton.icon(
+                  onPressed: onApproveAlways,
+                  icon: const Icon(Icons.done_all, size: 14),
+                  label: Text(AppLocalizations.of(context).approveForSession),
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     textStyle: const TextStyle(fontSize: 12),
@@ -589,25 +629,10 @@ class _ToolApprovalArea extends StatelessWidget {
               const SizedBox(width: 8),
               SizedBox(
                 height: 28,
-                child: OutlinedButton.icon(
-                  onPressed: onApproveAlways,
-                  icon: const Icon(Icons.done_all, size: 14),
-                  label: const Text('Always'),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    textStyle: const TextStyle(fontSize: 12),
-                    foregroundColor: statusColor,
-                    side: BorderSide(color: statusColor.withValues(alpha: 0.5)),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              SizedBox(
-                height: 28,
                 child: FilledButton.tonalIcon(
                   onPressed: onApprove,
                   icon: const Icon(Icons.check, size: 14),
-                  label: const Text('Approve'),
+                  label: Text(AppLocalizations.of(context).approveOnce),
                   style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     textStyle: const TextStyle(fontSize: 12),
@@ -2183,6 +2208,41 @@ class _StatusDotPainter extends CustomPainter {
       oldDelegate.inPlanMode != inPlanMode;
 }
 
+String? _formatAgentLabel(String? nickname, String? role) {
+  final trimmedNickname = nickname?.trim();
+  final trimmedRole = role?.trim();
+  final hasNickname = trimmedNickname != null && trimmedNickname.isNotEmpty;
+  final hasRole = trimmedRole != null && trimmedRole.isNotEmpty;
+  if (!hasNickname && !hasRole) return null;
+  if (hasNickname && hasRole) return '$trimmedNickname [$trimmedRole]';
+  return hasNickname ? trimmedNickname : '[$trimmedRole]';
+}
+
+class _AgentLabel extends StatelessWidget {
+  final String label;
+
+  const _AgentLabel({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(
+      children: [
+        Icon(Icons.smart_toy_outlined, size: 14, color: color),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 12, color: color),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class RecentSessionCard extends StatelessWidget {
   final RecentSession session;
   final VoidCallback onTap;
@@ -2211,14 +2271,10 @@ class RecentSessionCard extends StatelessWidget {
     final provider = providerFromRaw(session.provider);
     final providerStyle = providerStyleFor(context, provider);
     final isCodex = session.provider == 'codex';
-    final settingsSummary = isCodex
-        ? _buildSettingsSummary(
-            isCodex: true,
-            model: session.codexModel,
-            sandboxMode: session.codexSandboxMode,
-            approvalPolicy: session.codexApprovalPolicy,
-          )
-        : null;
+    final agentLabel = _formatAgentLabel(
+      session.agentNickname,
+      session.agentRole,
+    );
     final dateStr = _formatDateRange(session.created, session.modified);
 
     return Card(
@@ -2323,6 +2379,10 @@ class RecentSessionCard extends StatelessWidget {
                       ),
                     ],
                   ),
+                  if (agentLabel != null) ...[
+                    const SizedBox(height: 8),
+                    _AgentLabel(label: agentLabel),
+                  ],
                   const SizedBox(height: 8),
 
                   // Body Content
@@ -2364,16 +2424,15 @@ class RecentSessionCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
 
-                  if (settingsSummary != null) ...[
+                  if (isCodex) ...[
                     const SizedBox(height: 6),
-                    Text(
-                      settingsSummary,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: appColors.subtleText,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    CodexEnvironmentSummary(
+                      model: session.codexModel,
+                      reasoningEffort: session.codexModelReasoningEffort,
+                      executionMode: session.resolvedExecutionMode.value,
+                      sandboxMode: session.codexSandboxMode,
+                      showDefaultReasoning: true,
+                      compact: true,
                     ),
                   ],
 
@@ -2520,42 +2579,25 @@ class RecentSessionCard extends StatelessWidget {
   }
 }
 
-/// Build a compact settings summary for session cards.
-///
-/// Codex:  "gpt-5.3-codex  sandbox-on  bypass-all"
-/// Claude: "claude-sonnet-4-20250514  default" / "plan" / "bypass-all"
+/// Build a compact settings summary for Claude session cards.
 String _buildSettingsSummary({
   required bool isCodex,
   String? model,
-  String? sandboxMode,
-  String? approvalPolicy,
-  String? permissionMode,
+  String? executionMode,
+  bool planMode = false,
 }) {
-  if (isCodex) {
-    final modelText = (model == null || model.isEmpty) ? 'model:auto' : model;
-    final sandboxText = switch (sandboxMode) {
-      null || '' => 'sandbox-default',
-      'on' => 'sandbox-on',
-      'off' => 'sandbox-off',
-      final v => 'sandbox-$v',
-    };
-    final approvalText = switch (approvalPolicy) {
-      null || '' || 'unless-allow-listed' => 'default',
-      'never' => 'bypass-all',
-      final v => v,
-    };
-    return '$modelText  $sandboxText  $approvalText';
-  }
-  // Claude Code: show model + permissionMode label
-  final modeLabel = switch (permissionMode) {
-    null || '' || 'default' => 'default',
-    'acceptEdits' => 'accept-edits',
-    'plan' => 'plan',
-    'bypassPermissions' => 'bypass-all',
-    final v => v,
-  };
+  if (isCodex) return model ?? '';
+  final parts = <String>[
+    if (executionMode == 'fullAccess')
+      'full-access'
+    else if (executionMode == 'acceptEdits')
+      'accept-edits'
+    else
+      'default',
+    if (planMode) 'plan-on',
+  ];
   if (model != null && model.isNotEmpty) {
-    return '$model  $modeLabel';
+    return '$model  ${parts.join("  ")}';
   }
-  return modeLabel;
+  return parts.join('  ');
 }

@@ -66,7 +66,7 @@ class AssistantMessage {
       id: json['id'] as String? ?? '',
       role: json['role'] as String? ?? 'assistant',
       content: contentList,
-      model: json['model'] as String? ?? '',
+      model: sanitizeCodexModelName(json['model'] as String?) ?? '',
     );
   }
 }
@@ -111,6 +111,14 @@ enum Provider {
   const Provider(this.value, this.label);
 }
 
+String? sanitizeCodexModelName(String? model) {
+  final normalized = model?.trim();
+  if (normalized == null || normalized.isEmpty || normalized == 'codex') {
+    return null;
+  }
+  return normalized;
+}
+
 // ---- Permission mode ----
 
 enum PermissionMode {
@@ -122,6 +130,67 @@ enum PermissionMode {
   final String value;
   final String label;
   const PermissionMode(this.value, this.label);
+}
+
+enum ExecutionMode {
+  defaultMode('default', 'Default'),
+  acceptEdits('acceptEdits', 'Accept Edits'),
+  fullAccess('fullAccess', 'Full Access');
+
+  final String value;
+  final String label;
+  const ExecutionMode(this.value, this.label);
+}
+
+ExecutionMode? executionModeFromRaw(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  for (final value in ExecutionMode.values) {
+    if (value.value == raw) return value;
+  }
+  return null;
+}
+
+bool derivePlanMode({bool? planMode, String? permissionMode}) {
+  return planMode ?? (permissionMode == PermissionMode.plan.value);
+}
+
+ExecutionMode deriveExecutionMode({
+  String? provider,
+  String? executionMode,
+  String? permissionMode,
+  String? approvalPolicy,
+}) {
+  final explicit = executionModeFromRaw(executionMode);
+  if (explicit != null) return explicit;
+
+  if (permissionMode == PermissionMode.bypassPermissions.value) {
+    return ExecutionMode.fullAccess;
+  }
+  if (permissionMode == PermissionMode.acceptEdits.value) {
+    return provider == Provider.codex.value
+        ? ExecutionMode.defaultMode
+        : ExecutionMode.acceptEdits;
+  }
+  if (approvalPolicy == 'never') return ExecutionMode.fullAccess;
+  return ExecutionMode.defaultMode;
+}
+
+PermissionMode legacyPermissionModeFromModes(
+  Provider provider, {
+  required ExecutionMode executionMode,
+  required bool planMode,
+}) {
+  if (planMode) return PermissionMode.plan;
+  switch (executionMode) {
+    case ExecutionMode.defaultMode:
+      return provider == Provider.codex
+          ? PermissionMode.acceptEdits
+          : PermissionMode.defaultMode;
+    case ExecutionMode.acceptEdits:
+      return PermissionMode.acceptEdits;
+    case ExecutionMode.fullAccess:
+      return PermissionMode.bypassPermissions;
+  }
 }
 
 enum ClaudeEffort {
@@ -322,10 +391,16 @@ sealed class ServerMessage {
         sessionId: json['sessionId'] as String?,
         claudeSessionId: json['claudeSessionId'] as String?,
         model: json['model'] as String?,
+        approvalPolicy: json['approvalPolicy'] as String?,
         provider: json['provider'] as String?,
         projectPath: json['projectPath'] as String?,
         permissionMode: json['permissionMode'] as String?,
+        executionMode: json['executionMode'] as String?,
+        planMode: json['planMode'] as bool?,
         sandboxMode: json['sandboxMode'] as String?,
+        modelReasoningEffort: json['modelReasoningEffort'] as String?,
+        networkAccessEnabled: json['networkAccessEnabled'] as bool?,
+        webSearchMode: json['webSearchMode'] as String?,
         slashCommands:
             (json['slashCommands'] as List?)
                 ?.map((e) => e as String)
@@ -394,6 +469,9 @@ sealed class ServerMessage {
         toolUseId: json['toolUseId'] as String,
         toolName: json['toolName'] as String,
         input: Map<String, dynamic>.from(json['input'] as Map),
+      ),
+      'permission_resolved' => PermissionResolvedMessage(
+        toolUseId: json['toolUseId'] as String,
       ),
       'stream_delta' => StreamDeltaMessage(text: json['text'] as String),
       'thinking_delta' => ThinkingDeltaMessage(text: json['text'] as String),
@@ -662,10 +740,16 @@ class SystemMessage implements ServerMessage {
   /// Falls back to [sessionId] when not provided.
   final String? claudeSessionId;
   final String? model;
+  final String? approvalPolicy;
   final String? provider;
   final String? projectPath;
   final String? permissionMode;
+  final String? executionMode;
+  final bool? planMode;
   final String? sandboxMode;
+  final String? modelReasoningEffort;
+  final bool? networkAccessEnabled;
+  final String? webSearchMode;
   final List<String> slashCommands;
   final List<String> skills;
   final List<CodexSkillMetadata> skillMetadata;
@@ -679,10 +763,16 @@ class SystemMessage implements ServerMessage {
     this.sessionId,
     this.claudeSessionId,
     this.model,
+    this.approvalPolicy,
     this.provider,
     this.projectPath,
     this.permissionMode,
+    this.executionMode,
+    this.planMode,
     this.sandboxMode,
+    this.modelReasoningEffort,
+    this.networkAccessEnabled,
+    this.webSearchMode,
     this.slashCommands = const [],
     this.skills = const [],
     this.skillMetadata = const [],
@@ -773,9 +863,22 @@ class PermissionRequestMessage implements ServerMessage {
   bool get isRequestUserInputApproval =>
       toolName == 'AskUserQuestion' && isMcpApprovalRequestUserInput(input);
 
+  bool get isMcpElicitation => toolName == 'McpElicitation';
+
+  bool get isPermissionGrantRequest => toolName == 'Permissions';
+
   String get displayToolName {
     if (isRequestUserInputApproval) {
       return requestUserInputHeader(input) ?? 'App Tool Approval';
+    }
+    if (isMcpElicitation) {
+      final serverName = input['serverName'] as String?;
+      return serverName == null || serverName.isEmpty
+          ? 'MCP Elicitation'
+          : 'MCP: $serverName';
+    }
+    if (isPermissionGrantRequest) {
+      return 'Additional Permissions';
     }
     return toolName;
   }
@@ -785,15 +888,135 @@ class PermissionRequestMessage implements ServerMessage {
     if (isRequestUserInputApproval) {
       return requestUserInputQuestionText(input) ?? displayToolName;
     }
+    if (isMcpElicitation) {
+      final message = input['message'] as String?;
+      final url = input['url'] as String?;
+      if (message != null &&
+          message.isNotEmpty &&
+          url != null &&
+          url.isNotEmpty) {
+        return '$message | $url';
+      }
+      return message ?? url ?? displayToolName;
+    }
+    if (isPermissionGrantRequest) {
+      final reason = input['reason'] as String?;
+      if (reason != null && reason.isNotEmpty) return reason;
+      if (input['permissions'] != null) return 'Grant requested permissions';
+    }
     final parts = <String>[];
-    for (final key in ['command', 'file_path', 'path', 'pattern', 'url']) {
+    for (final key in [
+      'command',
+      'file_path',
+      'path',
+      'pattern',
+      'url',
+      'reason',
+    ]) {
       if (input.containsKey(key)) {
         final val = input[key].toString();
-        parts.add(val.length > 60 ? '${val.substring(0, 60)}...' : val);
+        parts.add(val);
       }
     }
     return parts.isNotEmpty ? parts.join(' | ') : toolName;
   }
+
+  List<String> get detailLines {
+    final lines = <String>[];
+
+    if (isPermissionGrantRequest) {
+      final permissions = _flattenPermissionValues(input['permissions']);
+      if (permissions.isNotEmpty) {
+        lines.add('Permissions: ${permissions.join(', ')}');
+      }
+    }
+
+    final additionalPermissions = _flattenPermissionValues(
+      input['additionalPermissions'],
+    );
+    if (additionalPermissions.isNotEmpty) {
+      lines.add('Additional permissions: ${additionalPermissions.join(', ')}');
+    }
+
+    final execAmendment = _stringMapSummary(
+      input['proposedExecpolicyAmendment'],
+    );
+    if (execAmendment != null) {
+      lines.add('Exec policy: $execAmendment');
+    }
+
+    final networkAmendments = _networkPolicySummary(
+      input['proposedNetworkPolicyAmendments'],
+    );
+    if (networkAmendments != null) {
+      lines.add('Network policy: $networkAmendments');
+    }
+
+    final availableDecisions = _stringList(input['availableDecisions']);
+    if (availableDecisions.isNotEmpty) {
+      lines.add('Allowed actions: ${availableDecisions.join(', ')}');
+    }
+
+    return lines;
+  }
+}
+
+List<String> _flattenPermissionValues(dynamic value, [String prefix = '']) {
+  if (value is Map) {
+    final out = <String>[];
+    for (final entry in value.entries) {
+      final key = entry.key.toString();
+      final nextPrefix = prefix.isEmpty ? key : '$prefix.$key';
+      out.addAll(_flattenPermissionValues(entry.value, nextPrefix));
+    }
+    return out;
+  }
+  if (value is List) {
+    return value
+        .map((entry) => entry.toString())
+        .where((entry) => entry.isNotEmpty)
+        .map((entry) => prefix.isEmpty ? entry : '$prefix=$entry')
+        .toList();
+  }
+  if (value is bool || value is num || value is String) {
+    final text = value.toString();
+    if (text.isEmpty) return const [];
+    return [prefix.isEmpty ? text : '$prefix=$text'];
+  }
+  return const [];
+}
+
+String? _stringMapSummary(dynamic value) {
+  if (value is! Map) return null;
+  final parts = value.entries
+      .map((entry) => '${entry.key}=${entry.value}')
+      .where((entry) => entry.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) return null;
+  return parts.join(', ');
+}
+
+String? _networkPolicySummary(dynamic value) {
+  if (value is! List) return null;
+  final parts = value
+      .map((entry) => _stringMapSummary(entry))
+      .whereType<String>()
+      .toList();
+  if (parts.isEmpty) return null;
+  return parts.join(' | ');
+}
+
+List<String> _stringList(dynamic value) {
+  if (value is! List) return const [];
+  return value
+      .map((entry) => entry.toString())
+      .where((entry) => entry.isNotEmpty)
+      .toList();
+}
+
+class PermissionResolvedMessage implements ServerMessage {
+  final String toolUseId;
+  const PermissionResolvedMessage({required this.toolUseId});
 }
 
 class StreamDeltaMessage implements ServerMessage {
@@ -1428,6 +1651,8 @@ class RecentSession {
 
   /// User-assigned session name (customTitle for Claude, thread_name for Codex).
   final String? name;
+  final String? agentNickname;
+  final String? agentRole;
   final String? summary;
   final String firstPrompt;
   final String? lastPrompt;
@@ -1438,6 +1663,8 @@ class RecentSession {
   final String? resumeCwd;
   final bool isSidechain;
   final String? codexApprovalPolicy;
+  final String? executionMode;
+  final bool planMode;
   final String? codexSandboxMode;
   final String? codexModel;
   final String? codexModelReasoningEffort;
@@ -1448,6 +1675,8 @@ class RecentSession {
     required this.sessionId,
     this.provider,
     this.name,
+    this.agentNickname,
+    this.agentRole,
     this.summary,
     required this.firstPrompt,
     this.lastPrompt,
@@ -1458,6 +1687,8 @@ class RecentSession {
     this.resumeCwd,
     required this.isSidechain,
     this.codexApprovalPolicy,
+    this.executionMode,
+    this.planMode = false,
     this.codexSandboxMode,
     this.codexModel,
     this.codexModelReasoningEffort,
@@ -1465,12 +1696,28 @@ class RecentSession {
     this.codexWebSearchMode,
   });
 
+  ExecutionMode get resolvedExecutionMode => deriveExecutionMode(
+    provider: provider,
+    executionMode: executionMode,
+    approvalPolicy: codexApprovalPolicy,
+  );
+
+  bool get resolvedPlanMode => planMode;
+
+  String get permissionMode => legacyPermissionModeFromModes(
+    provider == Provider.codex.value ? Provider.codex : Provider.claude,
+    executionMode: resolvedExecutionMode,
+    planMode: resolvedPlanMode,
+  ).value;
+
   factory RecentSession.fromJson(Map<String, dynamic> json) {
     final codexSettings = json['codexSettings'] as Map<String, dynamic>?;
     return RecentSession(
       sessionId: json['sessionId'] as String,
       provider: json['provider'] as String?,
       name: json['name'] as String?,
+      agentNickname: json['agentNickname'] as String?,
+      agentRole: json['agentRole'] as String?,
       summary: json['summary'] as String?,
       firstPrompt: json['firstPrompt'] as String? ?? '',
       lastPrompt: json['lastPrompt'] as String?,
@@ -1481,8 +1728,19 @@ class RecentSession {
       resumeCwd: json['resumeCwd'] as String?,
       isSidechain: json['isSidechain'] as bool? ?? false,
       codexApprovalPolicy: codexSettings?['approvalPolicy'] as String?,
+      executionMode:
+          json['executionMode'] as String? ??
+          deriveExecutionMode(
+            provider: json['provider'] as String?,
+            permissionMode: json['permissionMode'] as String?,
+            approvalPolicy: codexSettings?['approvalPolicy'] as String?,
+          ).value,
+      planMode: derivePlanMode(
+        planMode: json['planMode'] as bool?,
+        permissionMode: json['permissionMode'] as String?,
+      ),
       codexSandboxMode: codexSettings?['sandboxMode'] as String?,
-      codexModel: codexSettings?['model'] as String?,
+      codexModel: sanitizeCodexModelName(codexSettings?['model'] as String?),
       codexModelReasoningEffort:
           codexSettings?['modelReasoningEffort'] as String?,
       codexNetworkAccessEnabled:
@@ -1510,6 +1768,8 @@ class RecentSession {
       sessionId: sessionId,
       provider: provider,
       name: clearName ? null : (name ?? this.name),
+      agentNickname: agentNickname,
+      agentRole: agentRole,
       summary: summary,
       firstPrompt: firstPrompt,
       lastPrompt: lastPrompt,
@@ -1520,6 +1780,8 @@ class RecentSession {
       resumeCwd: resumeCwd,
       isSidechain: isSidechain,
       codexApprovalPolicy: codexApprovalPolicy,
+      executionMode: executionMode,
+      planMode: planMode,
       codexSandboxMode: codexSandboxMode,
       codexModel: codexModel,
       codexModelReasoningEffort: codexModelReasoningEffort,
@@ -1539,6 +1801,8 @@ class SessionInfo {
 
   /// User-assigned session name.
   final String? name;
+  final String? agentNickname;
+  final String? agentRole;
   final String status;
   final String createdAt;
   final String lastActivityAt;
@@ -1547,6 +1811,8 @@ class SessionInfo {
   final String? worktreePath;
   final String? worktreeBranch;
   final String? permissionMode;
+  final String? executionMode;
+  final bool planMode;
   final String? model;
   final String? codexApprovalPolicy;
   final String? codexSandboxMode;
@@ -1562,6 +1828,8 @@ class SessionInfo {
     required this.projectPath,
     this.claudeSessionId,
     this.name,
+    this.agentNickname,
+    this.agentRole,
     required this.status,
     required this.createdAt,
     required this.lastActivityAt,
@@ -1570,6 +1838,8 @@ class SessionInfo {
     this.worktreePath,
     this.worktreeBranch,
     this.permissionMode,
+    this.executionMode,
+    this.planMode = false,
     this.model,
     this.codexApprovalPolicy,
     this.codexSandboxMode,
@@ -1580,12 +1850,39 @@ class SessionInfo {
     this.pendingPermission,
   });
 
+  ExecutionMode get resolvedExecutionMode => deriveExecutionMode(
+    provider: provider,
+    executionMode: executionMode,
+    permissionMode: permissionMode,
+    approvalPolicy: codexApprovalPolicy,
+  );
+
+  bool get resolvedPlanMode =>
+      planMode || permissionMode == PermissionMode.plan.value;
+
+  String get effectivePermissionMode =>
+      permissionMode ??
+      legacyPermissionModeFromModes(
+        provider == Provider.codex.value ? Provider.codex : Provider.claude,
+        executionMode: resolvedExecutionMode,
+        planMode: resolvedPlanMode,
+      ).value;
+
   SessionInfo copyWith({
     String? status,
     String? name,
     bool clearName = false,
     String? lastMessage,
     String? permissionMode,
+    String? executionMode,
+    bool? planMode,
+    String? model,
+    String? codexApprovalPolicy,
+    String? codexSandboxMode,
+    String? codexModel,
+    String? codexModelReasoningEffort,
+    bool? codexNetworkAccessEnabled,
+    String? codexWebSearchMode,
     PermissionRequestMessage? pendingPermission,
     bool clearPermission = false,
   }) {
@@ -1595,6 +1892,8 @@ class SessionInfo {
       projectPath: projectPath,
       claudeSessionId: claudeSessionId,
       name: clearName ? null : (name ?? this.name),
+      agentNickname: agentNickname,
+      agentRole: agentRole,
       status: status ?? this.status,
       createdAt: createdAt,
       lastActivityAt: lastActivityAt,
@@ -1603,13 +1902,17 @@ class SessionInfo {
       worktreePath: worktreePath,
       worktreeBranch: worktreeBranch,
       permissionMode: permissionMode ?? this.permissionMode,
-      model: model,
-      codexApprovalPolicy: codexApprovalPolicy,
-      codexSandboxMode: codexSandboxMode,
-      codexModel: codexModel,
-      codexModelReasoningEffort: codexModelReasoningEffort,
-      codexNetworkAccessEnabled: codexNetworkAccessEnabled,
-      codexWebSearchMode: codexWebSearchMode,
+      executionMode: executionMode ?? this.executionMode,
+      planMode: planMode ?? this.planMode,
+      model: model ?? this.model,
+      codexApprovalPolicy: codexApprovalPolicy ?? this.codexApprovalPolicy,
+      codexSandboxMode: codexSandboxMode ?? this.codexSandboxMode,
+      codexModel: codexModel ?? this.codexModel,
+      codexModelReasoningEffort:
+          codexModelReasoningEffort ?? this.codexModelReasoningEffort,
+      codexNetworkAccessEnabled:
+          codexNetworkAccessEnabled ?? this.codexNetworkAccessEnabled,
+      codexWebSearchMode: codexWebSearchMode ?? this.codexWebSearchMode,
       pendingPermission: clearPermission
           ? null
           : (pendingPermission ?? this.pendingPermission),
@@ -1625,6 +1928,8 @@ class SessionInfo {
       projectPath: json['projectPath'] as String,
       claudeSessionId: json['claudeSessionId'] as String?,
       name: json['name'] as String?,
+      agentNickname: json['agentNickname'] as String?,
+      agentRole: json['agentRole'] as String?,
       status: json['status'] as String? ?? 'idle',
       createdAt: json['createdAt'] as String? ?? '',
       lastActivityAt: json['lastActivityAt'] as String? ?? '',
@@ -1633,10 +1938,21 @@ class SessionInfo {
       worktreePath: json['worktreePath'] as String?,
       worktreeBranch: json['worktreeBranch'] as String?,
       permissionMode: json['permissionMode'] as String?,
+      executionMode:
+          json['executionMode'] as String? ??
+          deriveExecutionMode(
+            provider: json['provider'] as String?,
+            permissionMode: json['permissionMode'] as String?,
+            approvalPolicy: codexSettings?['approvalPolicy'] as String?,
+          ).value,
+      planMode: derivePlanMode(
+        planMode: json['planMode'] as bool?,
+        permissionMode: json['permissionMode'] as String?,
+      ),
       model: json['model'] as String?,
       codexApprovalPolicy: codexSettings?['approvalPolicy'] as String?,
       codexSandboxMode: codexSettings?['sandboxMode'] as String?,
-      codexModel: codexSettings?['model'] as String?,
+      codexModel: sanitizeCodexModelName(codexSettings?['model'] as String?),
       codexModelReasoningEffort:
           codexSettings?['modelReasoningEffort'] as String?,
       codexNetworkAccessEnabled:
@@ -1666,6 +1982,8 @@ class ClientMessage {
     String? sessionId,
     bool? continueMode,
     String? permissionMode,
+    String? executionMode,
+    bool? planMode,
     String? effort,
     int? maxTurns,
     double? maxBudgetUsd,
@@ -1688,6 +2006,8 @@ class ClientMessage {
       'sessionId': ?sessionId,
       if (continueMode == true) 'continue': true,
       'permissionMode': ?permissionMode,
+      'executionMode': ?executionMode,
+      'planMode': ?planMode,
       'effort': ?effort,
       'maxTurns': ?maxTurns,
       'maxBudgetUsd': ?maxBudgetUsd,
@@ -1743,6 +2063,21 @@ class ClientMessage {
     return ClientMessage._(<String, dynamic>{
       'type': 'set_permission_mode',
       'mode': mode,
+      'sessionId': ?sessionId,
+    });
+  }
+
+  factory ClientMessage.setSessionMode({
+    required String legacyMode,
+    String? executionMode,
+    bool? planMode,
+    String? sessionId,
+  }) {
+    return ClientMessage._(<String, dynamic>{
+      'type': 'set_permission_mode',
+      'mode': legacyMode,
+      'executionMode': ?executionMode,
+      'planMode': ?planMode,
       'sessionId': ?sessionId,
     });
   }
@@ -1871,6 +2206,8 @@ class ClientMessage {
     String sessionId,
     String projectPath, {
     String? permissionMode,
+    String? executionMode,
+    bool? planMode,
     String? effort,
     int? maxTurns,
     double? maxBudgetUsd,
@@ -1889,6 +2226,8 @@ class ClientMessage {
       'sessionId': sessionId,
       'projectPath': projectPath,
       'permissionMode': ?permissionMode,
+      'executionMode': ?executionMode,
+      'planMode': ?planMode,
       'effort': ?effort,
       'maxTurns': ?maxTurns,
       'maxBudgetUsd': ?maxBudgetUsd,

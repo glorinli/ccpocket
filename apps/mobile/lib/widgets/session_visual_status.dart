@@ -21,9 +21,10 @@ class SessionVisualStatus {
 SessionVisualStatus sessionVisualStatusFor({
   required String rawStatus,
   String? permissionMode,
+  bool planMode = false,
   PermissionRequestMessage? pendingPermission,
 }) {
-  final showPlanBadge = permissionMode == PermissionMode.plan.value;
+  final showPlanBadge = planMode || permissionMode == PermissionMode.plan.value;
 
   if (pendingPermission != null) {
     final detail = switch (pendingPermission.toolName) {
@@ -32,6 +33,8 @@ SessionVisualStatus sessionVisualStatusFor({
         pendingPermission.isRequestUserInputApproval
             ? 'Approve tool call'
             : 'Answer question',
+      'McpElicitation' => 'Answer MCP request',
+      'Permissions' => 'Grant permissions',
       _ => 'Approve ${pendingPermission.toolName}',
     };
     return SessionVisualStatus(

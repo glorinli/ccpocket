@@ -80,7 +80,10 @@ describe("CodexProcess (app-server)", () => {
 
     const initReq = nextOutgoingRequest(child);
     expect(initReq.method).toBe("initialize");
-    child.stdout.emit("data", `${JSON.stringify({ id: initReq.id, result: {} })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
 
     await tick();
     const initialized = nextOutgoingNotification(child);
@@ -95,12 +98,137 @@ describe("CodexProcess (app-server)", () => {
       model: "gpt-5.3-codex",
     });
 
-    child.stdout.emit("data", `${JSON.stringify({ id: startReq.id, result: { thread: { id: "thr_1" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        id: startReq.id,
+        result: {
+          thread: { id: "thr_1" },
+          model: "gpt-5.3-codex",
+          approvalPolicy: "on-request",
+          sandbox: {
+            type: "workspaceWrite",
+            networkAccess: false,
+          },
+        },
+      })}\n`,
+    );
     await tick();
 
     expect(messages).toContainEqual(
-      expect.objectContaining({ type: "system", subtype: "init", sessionId: "thr_1" }),
+      expect.objectContaining({
+        type: "system",
+        subtype: "init",
+        provider: "codex",
+        sessionId: "thr_1",
+        model: "gpt-5.3-codex",
+        approvalPolicy: "on-request",
+        sandboxMode: "workspace-write",
+        networkAccessEnabled: false,
+      }),
     );
+
+    proc.stop();
+  });
+
+  it("ignores placeholder codex model names from resume state", async () => {
+    const proc = new CodexProcess();
+    const messages: unknown[] = [];
+    proc.on("message", (msg) => messages.push(msg));
+
+    proc.start("/tmp/project-placeholder", {
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
+      model: "codex",
+    });
+
+    const child = fakeChildren[0];
+    await tick();
+
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+
+    await tick();
+    nextOutgoingNotification(child); // initialized
+
+    const startReq = nextOutgoingRequest(child);
+    expect(startReq.method).toBe("thread/start");
+    expect(startReq.params).not.toHaveProperty("model");
+
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        id: startReq.id,
+        result: { thread: { id: "thr_placeholder" } },
+      })}\n`,
+    );
+
+    await tick();
+    drainSkillsList(child);
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "system",
+        subtype: "init",
+        provider: "codex",
+        sessionId: "thr_placeholder",
+      }),
+    );
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({
+        type: "system",
+        subtype: "init",
+        model: "codex",
+      }),
+    );
+
+    proc.sendInput("continue");
+    await tick();
+    const turnReq = nextOutgoingRequest(child);
+    expect(turnReq.method).toBe("turn/start");
+    expect(turnReq.params).not.toHaveProperty("model");
+    expect(turnReq.params).toMatchObject({
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "gpt-5.4",
+        },
+      },
+    });
+
+    proc.stop();
+  });
+
+  it("can initialize app-server without starting a thread", async () => {
+    const proc = new CodexProcess();
+
+    const initializePromise = proc.initializeOnly("/tmp/project-init-only");
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).toHaveBeenCalledWith(
+      "codex",
+      ["app-server", "--listen", "stdio://"],
+      expect.objectContaining({ cwd: "/tmp/project-init-only" }),
+    );
+
+    const child = fakeChildren[0];
+    await tick();
+
+    const initReq = nextOutgoingRequest(child);
+    expect(initReq.method).toBe("initialize");
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+
+    await initializePromise;
+
+    const initialized = nextOutgoingNotification(child);
+    expect(initialized.method).toBe("initialized");
+    expect(() => nextOutgoingRequest(child)).toThrow();
 
     proc.stop();
   });
@@ -115,11 +243,17 @@ describe("CodexProcess (app-server)", () => {
 
     await tick();
     const initReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: initReq.id, result: {} })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
     await tick();
     nextOutgoingNotification(child); // initialized
     const threadReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_2" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_2" } } })}\n`,
+    );
 
     await tick();
     drainSkillsList(child);
@@ -128,8 +262,14 @@ describe("CodexProcess (app-server)", () => {
     const turnReq = nextOutgoingRequest(child);
     expect(turnReq.method).toBe("turn/start");
 
-    child.stdout.emit("data", `${JSON.stringify({ id: turnReq.id, result: { turn: { id: "turn_1" } } })}\n`);
-    child.stdout.emit("data", `${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_1" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: turnReq.id, result: { turn: { id: "turn_1" } } })}\n`,
+    );
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_1" } } })}\n`,
+    );
     child.stdout.emit(
       "data",
       `${JSON.stringify({
@@ -172,7 +312,11 @@ describe("CodexProcess (app-server)", () => {
     await tick();
 
     expect(messages).toContainEqual(
-      expect.objectContaining({ type: "result", subtype: "success", sessionId: "thr_2" }),
+      expect.objectContaining({
+        type: "result",
+        subtype: "success",
+        sessionId: "thr_2",
+      }),
     );
 
     proc.stop();
@@ -188,11 +332,17 @@ describe("CodexProcess (app-server)", () => {
 
     await tick();
     const initReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: initReq.id, result: {} })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
     await tick();
     nextOutgoingNotification(child); // initialized
     const threadReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_3" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_3" } } })}\n`,
+    );
 
     await tick();
     drainSkillsList(child);
@@ -200,8 +350,14 @@ describe("CodexProcess (app-server)", () => {
     await tick();
     const turnReq = nextOutgoingRequest(child);
     expect(turnReq.method).toBe("turn/start");
-    child.stdout.emit("data", `${JSON.stringify({ id: turnReq.id, result: { turn: { id: "turn_2" } } })}\n`);
-    child.stdout.emit("data", `${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_2" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: turnReq.id, result: { turn: { id: "turn_2" } } })}\n`,
+    );
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_2" } } })}\n`,
+    );
 
     child.stdout.emit(
       "data",
@@ -259,7 +415,457 @@ describe("CodexProcess (app-server)", () => {
     await tick();
 
     expect(messages).toContainEqual(
-      expect.objectContaining({ type: "result", subtype: "success", sessionId: "thr_3" }),
+      expect.objectContaining({
+        type: "result",
+        subtype: "success",
+        sessionId: "thr_3",
+      }),
+    );
+
+    proc.stop();
+  });
+
+  it("responds to permission grants with granted scope and requested permissions", async () => {
+    const proc = new CodexProcess();
+    const messages: unknown[] = [];
+    proc.on("message", (msg) => messages.push(msg));
+
+    proc.start("/tmp/project-perms");
+    const child = fakeChildren[0];
+
+    await tick();
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+    await tick();
+    nextOutgoingNotification(child);
+    const threadReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_perms" } } })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        id: "req-perms-1",
+        method: "item/permissions/requestApproval",
+        params: {
+          itemId: "perm_item_1",
+          threadId: "thr_perms",
+          turnId: "turn_perms",
+          reason: "Need write access",
+          permissions: {
+            fileSystem: {
+              write: ["/tmp/project-perms"],
+            },
+          },
+        },
+      })}\n`,
+    );
+
+    await tick();
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "permission_request",
+        toolUseId: "perm_item_1",
+        toolName: "Permissions",
+      }),
+    );
+
+    proc.approveAlways("perm_item_1");
+    await tick();
+
+    const response = nextOutgoingResponse(child);
+    expect(response).toMatchObject({
+      id: "req-perms-1",
+      result: {
+        scope: "session",
+        permissions: {
+          fileSystem: {
+            write: ["/tmp/project-perms"],
+          },
+        },
+      },
+    });
+
+    proc.stop();
+  });
+
+  it("maps MCP elicitation form requests to answer flow", async () => {
+    const proc = new CodexProcess();
+    const messages: unknown[] = [];
+    proc.on("message", (msg) => messages.push(msg));
+
+    proc.start("/tmp/project-elicitation");
+    const child = fakeChildren[0];
+
+    await tick();
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+    await tick();
+    nextOutgoingNotification(child);
+    const threadReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_elicit" } } })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        id: "req-elicit-1",
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "thr_elicit",
+          turnId: "turn_elicit",
+          serverName: "codex_apps",
+          mode: "form",
+          message: "Confirm this operation",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              confirmed: {
+                type: "boolean",
+                title: "Confirmed",
+                description: "Whether to continue",
+              },
+            },
+            required: ["confirmed"],
+          },
+        },
+      })}\n`,
+    );
+
+    await tick();
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "permission_request",
+        toolUseId: "req-elicit-1",
+        toolName: "McpElicitation",
+      }),
+    );
+
+    proc.answer("req-elicit-1", "true");
+    await tick();
+
+    const response = nextOutgoingResponse(child);
+    expect(response).toMatchObject({
+      id: "req-elicit-1",
+      result: {
+        action: "accept",
+        content: {
+          confirmed: "true",
+        },
+      },
+    });
+
+    proc.stop();
+  });
+
+  it("clears pending requests when serverRequest/resolved arrives", async () => {
+    const proc = new CodexProcess();
+    const messages: unknown[] = [];
+    proc.on("message", (msg) => messages.push(msg));
+
+    proc.start("/tmp/project-resolved");
+    const child = fakeChildren[0];
+
+    await tick();
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+    await tick();
+    nextOutgoingNotification(child);
+    const threadReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_resolved" } } })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        id: "req-resolved-1",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          itemId: "item_resolved_1",
+          command: "pwd",
+          cwd: "/tmp/project-resolved",
+        },
+      })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        method: "serverRequest/resolved",
+        params: {
+          threadId: "thr_resolved",
+          requestId: "req-resolved-1",
+        },
+      })}\n`,
+    );
+    await tick();
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "permission_resolved",
+        toolUseId: "item_resolved_1",
+      }),
+    );
+
+    proc.stop();
+  });
+
+  it("uses acceptForSession for command approvals", async () => {
+    const proc = new CodexProcess();
+
+    proc.start("/tmp/project-approve-always");
+    const child = fakeChildren[0];
+
+    await tick();
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+    await tick();
+    nextOutgoingNotification(child);
+    const threadReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_always" } } })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        id: "req-always-1",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          itemId: "item_always_1",
+          command: "git status",
+          cwd: "/tmp/project-approve-always",
+        },
+      })}\n`,
+    );
+
+    await tick();
+    proc.approveAlways("item_always_1");
+    await tick();
+
+    const response = nextOutgoingResponse(child);
+    expect(response).toMatchObject({
+      id: "req-always-1",
+      result: { decision: "acceptForSession" },
+    });
+
+    proc.stop();
+  });
+
+  it("maps dynamic tool calls into tool_use and tool_result messages", async () => {
+    const proc = new CodexProcess();
+    const messages: unknown[] = [];
+    proc.on("message", (msg) => messages.push(msg));
+
+    proc.start("/tmp/project-dynamic-tool");
+    const child = fakeChildren[0];
+
+    await tick();
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+    await tick();
+    nextOutgoingNotification(child);
+    const threadReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_dynamic" } } })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        method: "item/started",
+        params: {
+          item: {
+            type: "dynamicToolCall",
+            id: "dyn_tool_1",
+            tool: "open_pr",
+            arguments: {
+              repo: "openai/codex",
+              title: "Add protocol support",
+            },
+            status: "inProgress",
+          },
+        },
+      })}\n`,
+    );
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "dynamicToolCall",
+            id: "dyn_tool_1",
+            tool: "open_pr",
+            arguments: {
+              repo: "openai/codex",
+              title: "Add protocol support",
+            },
+            status: "completed",
+            success: true,
+            contentItems: [
+              {
+                type: "inputText",
+                text: "Created PR #42",
+              },
+            ],
+          },
+        },
+      })}\n`,
+    );
+
+    await tick();
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "assistant",
+        message: expect.objectContaining({
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              type: "tool_use",
+              id: "dyn_tool_1",
+              name: "open_pr",
+              input: {
+                repo: "openai/codex",
+                title: "Add protocol support",
+              },
+            }),
+          ]),
+        }),
+      }),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        toolUseId: "dyn_tool_1",
+        toolName: "open_pr",
+        content: expect.stringContaining("Created PR #42"),
+      }),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        toolUseId: "dyn_tool_1",
+        content: expect.stringContaining("success: true"),
+      }),
+    );
+
+    proc.stop();
+  });
+
+  it("preserves MCP image outputs as raw content blocks for downstream rendering", async () => {
+    const proc = new CodexProcess();
+    const messages: unknown[] = [];
+    proc.on("message", (msg) => messages.push(msg));
+
+    proc.start("/tmp/project-mcp-images");
+    const child = fakeChildren[0];
+
+    await tick();
+    const initReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
+    await tick();
+    nextOutgoingNotification(child);
+    const threadReq = nextOutgoingRequest(child);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_mcp" } } })}\n`,
+    );
+
+    await tick();
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "mcpToolCall",
+            id: "mcp_tool_1",
+            server: "marionette",
+            tool: "take_screenshots",
+            arguments: {},
+            result: {
+              content: [
+                {
+                  type: "image",
+                  data: "aGVsbG8=",
+                  mimeType: "image/png",
+                },
+              ],
+            },
+          },
+        },
+      })}\n`,
+    );
+
+    await tick();
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "assistant",
+        message: expect.objectContaining({
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              type: "tool_use",
+              id: "mcp_tool_1",
+              name: "mcp:marionette/take_screenshots",
+              input: {},
+            }),
+          ]),
+        }),
+      }),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        toolUseId: "mcp_tool_1",
+        toolName: "mcp:marionette/take_screenshots",
+        content: "Generated 1 image",
+        rawContentBlocks: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              data: "aGVsbG8=",
+              media_type: "image/png",
+            },
+          },
+        ],
+      }),
     );
 
     proc.stop();
@@ -275,19 +881,31 @@ describe("CodexProcess (app-server)", () => {
 
     await tick();
     const initReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: initReq.id, result: {} })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: initReq.id, result: {} })}\n`,
+    );
     await tick();
     nextOutgoingNotification(child); // initialized
     const threadReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_4" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: threadReq.id, result: { thread: { id: "thr_4" } } })}\n`,
+    );
 
     await tick();
     drainSkillsList(child);
     proc.sendInput("make a plan");
     await tick();
     const turnReq = nextOutgoingRequest(child);
-    child.stdout.emit("data", `${JSON.stringify({ id: turnReq.id, result: { turn: { id: "turn_3" } } })}\n`);
-    child.stdout.emit("data", `${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_3" } } })}\n`);
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: turnReq.id, result: { turn: { id: "turn_3" } } })}\n`,
+    );
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ method: "turn/started", params: { turn: { id: "turn_3" } } })}\n`,
+    );
 
     child.stdout.emit(
       "data",
@@ -323,7 +941,9 @@ describe("CodexProcess (app-server)", () => {
           content: expect.arrayContaining([
             expect.objectContaining({
               type: "text",
-              text: expect.stringContaining("Plan update: Initial plan drafted"),
+              text: expect.stringContaining(
+                "Plan update: Initial plan drafted",
+              ),
             }),
           ]),
         }),
@@ -342,37 +962,62 @@ function consumeOutgoing(
     .flatMap((chunk) => chunk.split("\n"))
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-  const parsed = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  const parsed = lines.map(
+    (line) => JSON.parse(line) as Record<string, unknown>,
+  );
   const index = parsed.findIndex(predicate);
   if (index < 0) {
     throw new Error("Expected outgoing JSON-RPC message was not found");
   }
   const remaining = lines.filter((_, lineIndex) => lineIndex !== index);
-  child.stdin.writes = remaining.length > 0 ? [`${remaining.join("\n")}\n`] : [];
+  child.stdin.writes =
+    remaining.length > 0 ? [`${remaining.join("\n")}\n`] : [];
 
   return parsed[index];
 }
 
 function nextOutgoingRequest(child: FakeChildProcess): Record<string, unknown> {
-  return consumeOutgoing(child, (value) => typeof value.method === "string" && value.id !== undefined);
+  return consumeOutgoing(
+    child,
+    (value) => typeof value.method === "string" && value.id !== undefined,
+  );
 }
 
 /** Consume and reply to the background skills/list request that fires after thread/start. */
 function drainSkillsList(child: FakeChildProcess): void {
   try {
-    const req = consumeOutgoing(child, (value) => value.method === "skills/list" && value.id !== undefined);
-    child.stdout.emit("data", `${JSON.stringify({ id: req.id, result: { data: [] } })}\n`);
+    const req = consumeOutgoing(
+      child,
+      (value) => value.method === "skills/list" && value.id !== undefined,
+    );
+    child.stdout.emit(
+      "data",
+      `${JSON.stringify({ id: req.id, result: { data: [] } })}\n`,
+    );
   } catch {
     // skills/list may not have been emitted yet — safe to ignore
   }
 }
 
-function nextOutgoingNotification(child: FakeChildProcess): Record<string, unknown> {
-  return consumeOutgoing(child, (value) => typeof value.method === "string" && value.id === undefined);
+function nextOutgoingNotification(
+  child: FakeChildProcess,
+): Record<string, unknown> {
+  return consumeOutgoing(
+    child,
+    (value) => typeof value.method === "string" && value.id === undefined,
+  );
 }
 
-function nextOutgoingResponse(child: FakeChildProcess): Record<string, unknown> {
-  return consumeOutgoing(child, (value) => value.id !== undefined && value.result !== undefined && value.method === undefined);
+function nextOutgoingResponse(
+  child: FakeChildProcess,
+): Record<string, unknown> {
+  return consumeOutgoing(
+    child,
+    (value) =>
+      value.id !== undefined &&
+      value.result !== undefined &&
+      value.method === undefined,
+  );
 }
 
 async function tick(): Promise<void> {

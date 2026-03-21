@@ -1,8 +1,8 @@
 # CC Pocket
 
-CC Pocket は、Claude Code / Codex のセッションをスマホだけで開始・完結できるアプリです。ラップトップを開く必要なし。アプリを開いて、プロジェクトを選んで、どこからでもコーディング。
+CC Pocket は、Codex / Claude Code のセッションをスマホだけで開始・完結できるアプリです。ラップトップを開く必要なし。アプリを開いて、プロジェクトを選んで、どこからでもコーディング。
 
-[English README](README.md)
+[English README](README.md) | [简体中文版 README](README.zh-CN.md)
 
 <p align="center">
   <img src="docs/images/screenshots-ja.png" alt="CC Pocket screenshots" width="800">
@@ -16,7 +16,7 @@ AI コーディングエージェントは、機能まるごと自律的に書�
 
 判断にキーボードは要りません。画面と親指があれば十分です。
 
-CC Pocket はこのワークフローのために作りました。スマホからセッションを開始し、自分のマシンの Claude Code / Codex に作業を任せ、どこにいても判断だけ行う。
+CC Pocket はこのワークフローのために作りました。スマホからセッションを開始し、自分のマシンの Codex / Claude Code に作業を任せ、どこにいても判断だけ行う。
 
 ## こんな人向け
 
@@ -67,7 +67,7 @@ CC Pocket はアプローチが異なります。**セッションはスマホ�
 
 ### 1. Bridge Server を起動
 
-ホストマシンに [Node.js](https://nodejs.org/) 18 以上と CLI プロバイダ（[Claude Code](https://docs.anthropic.com/en/docs/claude-code) または [Codex](https://github.com/openai/codex)）をインストールし、以下を実行:
+ホストマシンに [Node.js](https://nodejs.org/) 18 以上と CLI プロバイダ（[Codex](https://github.com/openai/codex) または [Claude Code](https://docs.anthropic.com/en/docs/claude-code)）をインストールし、以下を実行:
 
 ```bash
 npx @ccpocket/bridge@latest
@@ -271,6 +271,7 @@ cd apps/mobile && flutter pub get && cd ../..
 | `BRIDGE_ALLOWED_DIRS` | `$HOME` | 許可するプロジェクトディレクトリ。カンマ区切り |
 | `DIFF_IMAGE_AUTO_DISPLAY_KB` | `1024` | 画像 diff の自動表示しきい値 |
 | `DIFF_IMAGE_MAX_SIZE_MB` | `5` | 画像 diff プレビューの最大サイズ |
+| `BRIDGE_ENABLE_USAGE` | 未設定 | Claude の使用量取得を有効化。**Claude Agent SDK 外で Anthropic API に直接通信します。自己責任でご利用ください。** |
 
 ## ライセンス
 

@@ -20,6 +20,8 @@ enum ChatSideEffect {
 class ChatStateUpdate {
   final ProcessStatus? status;
   final PermissionMode? permissionMode;
+  final ExecutionMode? executionMode;
+  final bool? planMode;
   final List<ChatEntry> entriesToAdd;
   final List<ChatEntry> entriesToPrepend;
   final String? pendingToolUseId;
@@ -59,6 +61,8 @@ class ChatStateUpdate {
   const ChatStateUpdate({
     this.status,
     this.permissionMode,
+    this.executionMode,
+    this.planMode,
     this.entriesToAdd = const [],
     this.entriesToPrepend = const [],
     this.pendingToolUseId,
@@ -160,7 +164,7 @@ class ChatMessageHandler {
           '[handler] permission_request: '
           'tool=$toolName id=$toolUseId',
         );
-        if (toolName == 'AskUserQuestion') {
+        if (toolName == 'AskUserQuestion' || toolName == 'McpElicitation') {
           return ChatStateUpdate(
             entriesToAdd: [ServerChatEntry(msg)],
             askToolUseId: toolUseId,
@@ -173,6 +177,9 @@ class ChatMessageHandler {
           pendingPermission: msg,
           inPlanMode: toolName == 'ExitPlanMode' ? true : null,
         );
+      case PermissionResolvedMessage(:final toolUseId):
+        logger.info('[handler] permission_resolved: id=$toolUseId');
+        return ChatStateUpdate(entriesToAdd: [ServerChatEntry(msg)]);
       case ResultMessage(:final subtype, :final cost):
         return _handleResult(
           msg,
@@ -260,7 +267,8 @@ class ChatMessageHandler {
           entriesToAdd: [
             ServerChatEntry(
               ErrorMessage(
-                message: 'This feature requires a newer Bridge server.\n'
+                message:
+                    'This feature requires a newer Bridge server.\n'
                     'Run: npm update -g @ccpocket/bridge',
                 errorCode: 'bridge_update_required',
               ),
@@ -488,7 +496,8 @@ class ChatMessageHandler {
         }
         // Track pending permission request
         if (m is PermissionRequestMessage) {
-          if (m.toolName == 'AskUserQuestion') {
+          if (m.toolName == 'AskUserQuestion' ||
+              m.toolName == 'McpElicitation') {
             // Codex sends AskUserQuestion as permission_request directly
             lastAskToolUseId = m.toolUseId;
             lastAskInput = m.input;
@@ -504,6 +513,13 @@ class ChatMessageHandler {
               lastAskToolUseId = content.id;
               lastAskInput = content.input;
             }
+          }
+        }
+        if (m is PermissionResolvedMessage) {
+          pendingPermissions.remove(m.toolUseId);
+          if (lastAskToolUseId != null && m.toolUseId == lastAskToolUseId) {
+            lastAskToolUseId = null;
+            lastAskInput = null;
           }
         }
         // A tool_result means that permission was resolved.
@@ -552,7 +568,15 @@ class ChatMessageHandler {
   ) {
     List<SlashCommand>? commands;
     PermissionMode? permissionMode;
+    ExecutionMode? executionMode;
     bool? inPlanMode;
+    bool? planMode;
+    bool hasExecutionSignals(SystemMessage message) =>
+        message.executionMode != null ||
+        message.permissionMode != null ||
+        message.approvalPolicy != null;
+    bool hasPlanSignals(SystemMessage message) =>
+        message.planMode != null || message.permissionMode != null;
     if ((subtype == 'init' ||
             subtype == 'session_created' ||
             subtype == 'supported_commands') &&
@@ -564,8 +588,40 @@ class ChatMessageHandler {
         (mode) => mode?.value == msg.permissionMode,
         orElse: () => null,
       );
+      if (hasExecutionSignals(msg)) {
+        executionMode = deriveExecutionMode(
+          provider: msg.provider,
+          executionMode: msg.executionMode,
+          permissionMode: msg.permissionMode,
+          approvalPolicy: msg.approvalPolicy,
+        );
+      }
+      if (hasPlanSignals(msg)) {
+        planMode = derivePlanMode(
+          planMode: msg.planMode,
+          permissionMode: msg.permissionMode,
+        );
+      }
       if (subtype == 'set_permission_mode' && permissionMode != null) {
-        inPlanMode = permissionMode == PermissionMode.plan;
+        inPlanMode = planMode;
+      }
+    } else if (msg is SystemMessage) {
+      if (hasExecutionSignals(msg)) {
+        executionMode = deriveExecutionMode(
+          provider: msg.provider,
+          executionMode: msg.executionMode,
+          permissionMode: msg.permissionMode,
+          approvalPolicy: msg.approvalPolicy,
+        );
+      }
+      if (hasPlanSignals(msg)) {
+        planMode = derivePlanMode(
+          planMode: msg.planMode,
+          permissionMode: msg.permissionMode,
+        );
+      }
+      if (subtype == 'set_permission_mode') {
+        inPlanMode = planMode;
       }
     }
     // Extract claudeSessionId from session_created or init messages.
@@ -586,6 +642,8 @@ class ChatMessageHandler {
     return ChatStateUpdate(
       entriesToAdd: addEntry ? [ServerChatEntry(msg)] : [],
       permissionMode: permissionMode,
+      executionMode: executionMode,
+      planMode: planMode,
       inPlanMode: inPlanMode,
       slashCommands: commands,
       claudeSessionId: sessionId,

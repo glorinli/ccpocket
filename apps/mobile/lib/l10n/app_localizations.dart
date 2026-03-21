@@ -7,6 +7,7 @@ import 'package:intl/intl.dart' as intl;
 
 import 'app_localizations_en.dart';
 import 'app_localizations_ja.dart';
+import 'app_localizations_zh.dart';
 
 // ignore_for_file: type=lint
 
@@ -96,6 +97,7 @@ abstract class AppLocalizations {
   static const List<Locale> supportedLocales = <Locale>[
     Locale('ja'),
     Locale('en'),
+    Locale('zh'),
   ];
 
   /// No description provided for @appTitle.
@@ -356,6 +358,24 @@ abstract class AppLocalizations {
   /// **'同じ設定で新規開始'**
   String get startNewWithSameSettings;
 
+  /// No description provided for @copyResumeCommand.
+  ///
+  /// In ja, this message translates to:
+  /// **'再開コマンドをコピー'**
+  String get copyResumeCommand;
+
+  /// No description provided for @copyResumeCommandSubtitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'mac / Linuxに引き継ぎ'**
+  String get copyResumeCommandSubtitle;
+
+  /// No description provided for @resumeCommandCopied.
+  ///
+  /// In ja, this message translates to:
+  /// **'再開コマンドをコピーしました'**
+  String get resumeCommandCopied;
+
   /// No description provided for @editSettingsThenStart.
   ///
   /// In ja, this message translates to:
@@ -614,6 +634,12 @@ abstract class AppLocalizations {
   /// **'承認'**
   String get approval;
 
+  /// No description provided for @restart.
+  ///
+  /// In ja, this message translates to:
+  /// **'再起動'**
+  String get restart;
+
   /// No description provided for @worktree.
   ///
   /// In ja, this message translates to:
@@ -749,7 +775,7 @@ abstract class AppLocalizations {
   /// No description provided for @branchHint.
   ///
   /// In ja, this message translates to:
-  /// **'ccpocket/<auto>'**
+  /// **'feature/...'**
   String get branchHint;
 
   /// No description provided for @noExistingWorktrees.
@@ -841,6 +867,144 @@ abstract class AppLocalizations {
   /// In ja, this message translates to:
   /// **'常に許可'**
   String get always;
+
+  /// No description provided for @approveOnce.
+  ///
+  /// In ja, this message translates to:
+  /// **'今回だけ許可'**
+  String get approveOnce;
+
+  /// No description provided for @approveForSession.
+  ///
+  /// In ja, this message translates to:
+  /// **'このセッション中は許可'**
+  String get approveForSession;
+
+  /// No description provided for @permissionDefaultDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'標準の承認フローです'**
+  String get permissionDefaultDescription;
+
+  /// No description provided for @permissionAcceptEditsDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'ファイル編集を自動で承認します'**
+  String get permissionAcceptEditsDescription;
+
+  /// No description provided for @permissionPlanDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'変更を実行する前に分析と計画を行います'**
+  String get permissionPlanDescription;
+
+  /// No description provided for @permissionBypassDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'ほとんどの承認確認なしで実行します'**
+  String get permissionBypassDescription;
+
+  /// No description provided for @executionDefaultDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'標準の承認フローです'**
+  String get executionDefaultDescription;
+
+  /// No description provided for @executionAcceptEditsDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'ファイル編集を自動で承認します'**
+  String get executionAcceptEditsDescription;
+
+  /// No description provided for @executionFullAccessDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'ほとんどの承認確認なしで実行します'**
+  String get executionFullAccessDescription;
+
+  /// No description provided for @codexPlanModeDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'先にプランを作成し、承認後に実行を開始します'**
+  String get codexPlanModeDescription;
+
+  /// No description provided for @sandboxRestrictedDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'制限された環境でコマンドを実行します'**
+  String get sandboxRestrictedDescription;
+
+  /// No description provided for @sandboxNativeDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'ネイティブ環境でコマンドを実行します'**
+  String get sandboxNativeDescription;
+
+  /// No description provided for @sandboxNativeCautionDescription.
+  ///
+  /// In ja, this message translates to:
+  /// **'ネイティブ環境でコマンドを実行します（注意）'**
+  String get sandboxNativeCautionDescription;
+
+  /// No description provided for @changePermissionModeTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'Permission Mode を変更'**
+  String get changePermissionModeTitle;
+
+  /// No description provided for @changePermissionModeBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'{mode} に切り替えるとセッションが再起動します。会話は保持されます。'**
+  String changePermissionModeBody(String mode);
+
+  /// No description provided for @changeExecutionModeTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'Execution Mode を変更'**
+  String get changeExecutionModeTitle;
+
+  /// No description provided for @changeExecutionModeBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'{mode} に切り替えるとセッションが再起動します。会話は保持されます。'**
+  String changeExecutionModeBody(String mode);
+
+  /// No description provided for @enablePlanModeTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'Plan Mode を有効化'**
+  String get enablePlanModeTitle;
+
+  /// No description provided for @disablePlanModeTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'Plan Mode を無効化'**
+  String get disablePlanModeTitle;
+
+  /// No description provided for @enablePlanModeBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'Plan Mode を有効化するとセッションが再起動します。会話は保持されます。'**
+  String get enablePlanModeBody;
+
+  /// No description provided for @disablePlanModeBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'Plan Mode を無効化するとセッションが再起動します。会話は保持されます。'**
+  String get disablePlanModeBody;
+
+  /// No description provided for @changeSandboxModeTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'Sandbox Mode を変更'**
+  String get changeSandboxModeTitle;
+
+  /// No description provided for @changeSandboxModeBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'{mode} に切り替えるとセッションが再起動します。会話は保持されます。'**
+  String changeSandboxModeBody(String mode);
 
   /// No description provided for @messagePlaceholder.
   ///
@@ -1199,7 +1363,7 @@ abstract class AppLocalizations {
   /// No description provided for @guideBridgePrereq2.
   ///
   /// In ja, this message translates to:
-  /// **'Claude Code CLI または Codex CLI\n（使いたい方だけでOK）'**
+  /// **'Codex CLI または Claude Code CLI\n（使いたい方だけでOK）'**
   String get guideBridgePrereq2;
 
   /// No description provided for @guideBridgeStep1.
@@ -2234,6 +2398,54 @@ abstract class AppLocalizations {
   /// **'閉じる'**
   String get showLess;
 
+  /// No description provided for @authErrorTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'Claude Codeの再ログインが必要です'**
+  String get authErrorTitle;
+
+  /// No description provided for @authErrorBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'BridgeマシンでClaude Codeを起動し、再ログインしてください。'**
+  String get authErrorBody;
+
+  /// No description provided for @authErrorPrimaryCommandLabel.
+  ///
+  /// In ja, this message translates to:
+  /// **'手順1'**
+  String get authErrorPrimaryCommandLabel;
+
+  /// No description provided for @authErrorSecondaryCommandLabel.
+  ///
+  /// In ja, this message translates to:
+  /// **'手順2'**
+  String get authErrorSecondaryCommandLabel;
+
+  /// No description provided for @authErrorAlternativeLabel.
+  ///
+  /// In ja, this message translates to:
+  /// **'シェルから実行する場合'**
+  String get authErrorAlternativeLabel;
+
+  /// No description provided for @apiKeyRequiredTitle.
+  ///
+  /// In ja, this message translates to:
+  /// **'APIキーが必要です'**
+  String get apiKeyRequiredTitle;
+
+  /// No description provided for @apiKeyRequiredBody.
+  ///
+  /// In ja, this message translates to:
+  /// **'サブスクリプション認証は規約上の懸念から現在制限されています。APIキーをご利用ください。'**
+  String get apiKeyRequiredBody;
+
+  /// No description provided for @apiKeyRequiredHint.
+  ///
+  /// In ja, this message translates to:
+  /// **'APIキーの取得:'**
+  String get apiKeyRequiredHint;
+
   /// No description provided for @authHelpTitle.
   ///
   /// In ja, this message translates to:
@@ -2243,14 +2455,32 @@ abstract class AppLocalizations {
   /// No description provided for @authHelpFetchError.
   ///
   /// In ja, this message translates to:
-  /// **'ヘルプガイドの取得に失敗しました'**
+  /// **'トラブルシューティングガイドを読み込めませんでした'**
   String get authHelpFetchError;
 
   /// No description provided for @authHelpButton.
   ///
   /// In ja, this message translates to:
-  /// **'ヘルプ'**
+  /// **'手順を見る'**
   String get authHelpButton;
+
+  /// No description provided for @authHelpLanguageJa.
+  ///
+  /// In ja, this message translates to:
+  /// **'日本語'**
+  String get authHelpLanguageJa;
+
+  /// No description provided for @authHelpLanguageEn.
+  ///
+  /// In ja, this message translates to:
+  /// **'English'**
+  String get authHelpLanguageEn;
+
+  /// No description provided for @authHelpLanguageZhHans.
+  ///
+  /// In ja, this message translates to:
+  /// **'简体中文'**
+  String get authHelpLanguageZhHans;
 
   /// No description provided for @terminalApp.
   ///
@@ -2321,13 +2551,13 @@ abstract class AppLocalizations {
   /// No description provided for @terminalAppExperimental.
   ///
   /// In ja, this message translates to:
-  /// **'実験的機能'**
+  /// **'プレビュー'**
   String get terminalAppExperimental;
 
   /// No description provided for @terminalAppExperimentalNote.
   ///
   /// In ja, this message translates to:
-  /// **'この機能は実験的です。プリセットはアプリや環境によって動作しない場合があります。新しいプリセットの追加は GitHub で歓迎しています！'**
+  /// **'この機能はプレビュー版です。プリセットはアプリや環境によって動作しない場合があります。新しいプリセットの追加は GitHub で歓迎しています！'**
   String get terminalAppExperimentalNote;
 
   /// No description provided for @sectionSpread.
@@ -2384,7 +2614,7 @@ class _AppLocalizationsDelegate
 
   @override
   bool isSupported(Locale locale) =>
-      <String>['en', 'ja'].contains(locale.languageCode);
+      <String>['en', 'ja', 'zh'].contains(locale.languageCode);
 
   @override
   bool shouldReload(_AppLocalizationsDelegate old) => false;
@@ -2397,6 +2627,8 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsEn();
     case 'ja':
       return AppLocalizationsJa();
+    case 'zh':
+      return AppLocalizationsZh();
   }
 
   throw FlutterError(

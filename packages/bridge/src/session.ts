@@ -3,10 +3,23 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToSlug, renameClaudeSession, renameCodexSession } from "./sessions-index.js";
-import { SdkProcess, type StartOptions, type RewindFilesResult } from "./sdk-process.js";
+import {
+  pathToSlug,
+  renameClaudeSession,
+  renameCodexSession,
+} from "./sessions-index.js";
+import {
+  SdkProcess,
+  type StartOptions,
+  type RewindFilesResult,
+} from "./sdk-process.js";
 import { CodexProcess, type CodexStartOptions } from "./codex-process.js";
-import type { ServerMessage, ProcessStatus, AssistantToolUseContent, Provider } from "./parser.js";
+import type {
+  ServerMessage,
+  ProcessStatus,
+  AssistantToolUseContent,
+  Provider,
+} from "./parser.js";
 import type { ImageRef, ImageStore } from "./image-store.js";
 import type { GalleryStore, GalleryImageMeta } from "./gallery-store.js";
 import { createWorktree, worktreeExists } from "./worktree.js";
@@ -66,6 +79,8 @@ export interface SessionSummary {
   worktreePath?: string;
   worktreeBranch?: string;
   permissionMode?: string;
+  executionMode?: string;
+  planMode?: boolean;
   model?: string;
   codexSettings?: {
     approvalPolicy?: string;
@@ -75,6 +90,8 @@ export interface SessionSummary {
     networkAccessEnabled?: boolean;
     webSearchMode?: string;
   };
+  agentNickname?: string;
+  agentRole?: string;
   /** Claude sandbox enabled state. */
   sandboxEnabled?: boolean;
   pendingPermission?: {
@@ -88,6 +105,41 @@ const MAX_HISTORY_PER_SESSION = 100;
 
 export type GalleryImageCallback = (meta: GalleryImageMeta) => void;
 
+function mergeCodexSettings(
+  current: SessionInfo["codexSettings"],
+  msg: Extract<ServerMessage, { type: "system" }>,
+): SessionInfo["codexSettings"] {
+  const model = sanitizeCodexModel(msg.model);
+  const next = {
+    ...(current ?? {}),
+    ...(msg.approvalPolicy !== undefined
+      ? { approvalPolicy: msg.approvalPolicy }
+      : {}),
+    ...(msg.sandboxMode !== undefined ? { sandboxMode: msg.sandboxMode } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(msg.modelReasoningEffort !== undefined
+      ? { modelReasoningEffort: msg.modelReasoningEffort }
+      : {}),
+    ...(msg.networkAccessEnabled !== undefined
+      ? { networkAccessEnabled: msg.networkAccessEnabled }
+      : {}),
+    ...(msg.webSearchMode !== undefined
+      ? { webSearchMode: msg.webSearchMode }
+      : {}),
+  };
+
+  return Object.values(next).some((value) => value !== undefined)
+    ? next
+    : current;
+}
+
+function sanitizeCodexModel(model: unknown): string | undefined {
+  if (typeof model !== "string") return undefined;
+  const normalized = model.trim();
+  if (!normalized || normalized === "codex") return undefined;
+  return normalized;
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionInfo>();
   private onMessage: (sessionId: string, msg: ServerMessage) => void;
@@ -97,7 +149,14 @@ export class SessionManager {
   private worktreeStore: WorktreeStore | null;
 
   /** Cache slash commands per project path for early loading on subsequent sessions. */
-  private commandCache = new Map<string, { slashCommands: string[]; skills: string[]; skillMetadata?: Array<Record<string, unknown>> }>();
+  private commandCache = new Map<
+    string,
+    {
+      slashCommands: string[];
+      skills: string[];
+      skillMetadata?: Array<Record<string, unknown>>;
+    }
+  >();
 
   constructor(
     onMessage: (sessionId: string, msg: ServerMessage) => void,
@@ -123,7 +182,8 @@ export class SessionManager {
   ): string {
     const id = randomUUID().slice(0, 8);
     const effectiveProvider = provider ?? "claude";
-    const proc = effectiveProvider === "codex" ? new CodexProcess() : new SdkProcess();
+    const proc =
+      effectiveProvider === "codex" ? new CodexProcess() : new SdkProcess();
 
     // Handle worktree: reuse existing or create new
     let wtPath: string | undefined;
@@ -139,7 +199,9 @@ export class SessionManager {
         const wt = createWorktree(projectPath, id, worktreeOpts.worktreeBranch);
         wtPath = wt.worktreePath;
         wtBranch = wt.branch;
-        console.log(`[session] Created worktree at ${wtPath} (branch: ${wtBranch})`);
+        console.log(
+          `[session] Created worktree at ${wtPath} (branch: ${wtBranch})`,
+        );
       } catch (err) {
         console.error(`[session] Failed to create worktree:`, err);
         // Fall through to use original projectPath
@@ -152,16 +214,20 @@ export class SessionManager {
     let gitBranch = "";
     try {
       gitBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-        cwd: effectiveCwd, encoding: "utf-8",
+        cwd: effectiveCwd,
+        encoding: "utf-8",
       }).trim();
-    } catch { /* not a git repo */ }
+    } catch {
+      /* not a git repo */
+    }
 
     const session: SessionInfo = {
       id,
       process: proc,
       provider: effectiveProvider,
       history: [],
-      pastMessages: pastMessages && pastMessages.length > 0 ? pastMessages : undefined,
+      pastMessages:
+        pastMessages && pastMessages.length > 0 ? pastMessages : undefined,
       projectPath,
       status: "starting",
       createdAt: new Date(),
@@ -200,8 +266,13 @@ export class SessionManager {
           ) {
             this.commandCache.set(projectPath, {
               slashCommands: msg.slashCommands,
-              skills: msg.skills ?? this.commandCache.get(projectPath)?.skills ?? [],
-              skillMetadata: (msg.skillMetadata as Array<Record<string, unknown>> | undefined) ?? this.commandCache.get(projectPath)?.skillMetadata,
+              skills:
+                msg.skills ?? this.commandCache.get(projectPath)?.skills ?? [],
+              skillMetadata:
+                (msg.skillMetadata as
+                  | Array<Record<string, unknown>>
+                  | undefined) ??
+                this.commandCache.get(projectPath)?.skillMetadata,
             });
           }
 
@@ -222,79 +293,109 @@ export class SessionManager {
               msg = { ...msg, toolName: cachedName };
             }
           }
-
-          // Extract images from tool_result content
-          if (msg.type === "tool_result" && this.imageStore) {
-            const paths = this.imageStore.extractImagePaths(msg.content);
-            if (paths.length > 0) {
-              const images = await this.imageStore.registerImages(paths, session.projectPath);
-              if (images.length > 0) {
-                msg = { ...msg, images };
-              }
-
-              // Also register in GalleryStore (disk-persistent)
-              if (this.galleryStore) {
-                for (const p of paths) {
-                  const meta = await this.galleryStore.addImage(
-                    p,
-                    session.projectPath,
-                    session.id,
-                  );
-                  if (meta && this.onGalleryImage) {
-                    this.onGalleryImage(meta);
-                  }
-                }
-              }
-            }
-
-            // Extract base64 images from content blocks (e.g., MCP screenshots)
-            if (msg.rawContentBlocks) {
-              const imageBlocks = (msg.rawContentBlocks as Array<Record<string, unknown>>)
-                .filter((c) => c.type === "image" && (c.source as Record<string, unknown>)?.type === "base64");
-
-              if (imageBlocks.length > 0) {
-                const existingImages = msg.images ?? [];
-                const newImages: ImageRef[] = [];
-
-                for (const block of imageBlocks) {
-                  const source = block.source as Record<string, unknown>;
-                  if (typeof source?.data !== "string" || typeof source?.media_type !== "string") continue;
-                  const b64Data = source.data as string;
-                  const mimeType = source.media_type as string;
-                  const ref = this.imageStore.registerFromBase64(b64Data, mimeType);
-                  if (ref) {
-                    newImages.push(ref);
-
-                    // Also persist to GalleryStore
-                    if (this.galleryStore) {
-                      const meta = await this.galleryStore.addImageFromBase64(
-                        b64Data,
-                        mimeType,
-                        session.projectPath,
-                        session.id,
-                      );
-                      if (meta && this.onGalleryImage) {
-                        this.onGalleryImage(meta);
-                      }
-                    }
-                  }
-                }
-
-                if (newImages.length > 0) {
-                  msg = { ...msg, images: [...existingImages, ...newImages] };
-                }
-              }
-
-              // Strip transient rawContentBlocks before sending to client
-              const { rawContentBlocks: _, ...cleanMsg } = msg;
-              msg = cleanMsg as typeof msg;
-            }
-          }
         } else {
           // Codex: capture thread_id for session tracking and worktree restore.
           if (msg.type === "system" && "sessionId" in msg && msg.sessionId) {
             session.claudeSessionId = msg.sessionId;
             this.saveWorktreeMapping(session);
+          }
+          if (msg.type === "system") {
+            session.codexSettings = mergeCodexSettings(
+              session.codexSettings,
+              msg,
+            );
+          }
+          const messageModel = sanitizeCodexModel(
+            msg.type === "assistant" ? msg.message.model : undefined,
+          );
+          if (msg.type === "assistant" && messageModel) {
+            session.codexSettings = {
+              ...(session.codexSettings ?? {}),
+              model: messageModel,
+            };
+          }
+        }
+
+        // Extract images from tool_result content for both Claude and Codex.
+        if (msg.type === "tool_result" && this.imageStore) {
+          const paths = this.imageStore.extractImagePaths(msg.content);
+          if (paths.length > 0) {
+            const images = await this.imageStore.registerImages(
+              paths,
+              session.projectPath,
+            );
+            if (images.length > 0) {
+              msg = { ...msg, images };
+            }
+
+            // Also register in GalleryStore (disk-persistent)
+            if (this.galleryStore) {
+              for (const p of paths) {
+                const meta = await this.galleryStore.addImage(
+                  p,
+                  session.projectPath,
+                  session.id,
+                );
+                if (meta && this.onGalleryImage) {
+                  this.onGalleryImage(meta);
+                }
+              }
+            }
+          }
+
+          // Extract base64 images from content blocks (e.g., MCP screenshots)
+          if (msg.rawContentBlocks) {
+            const imageBlocks = (
+              msg.rawContentBlocks as Array<Record<string, unknown>>
+            ).filter(
+              (c) =>
+                c.type === "image" &&
+                (c.source as Record<string, unknown>)?.type === "base64",
+            );
+
+            if (imageBlocks.length > 0) {
+              const existingImages = msg.images ?? [];
+              const newImages: ImageRef[] = [];
+
+              for (const block of imageBlocks) {
+                const source = block.source as Record<string, unknown>;
+                if (
+                  typeof source?.data !== "string" ||
+                  typeof source?.media_type !== "string"
+                )
+                  continue;
+                const b64Data = source.data as string;
+                const mimeType = source.media_type as string;
+                const ref = this.imageStore.registerFromBase64(
+                  b64Data,
+                  mimeType,
+                );
+                if (ref) {
+                  newImages.push(ref);
+
+                  // Also persist to GalleryStore
+                  if (this.galleryStore) {
+                    const meta = await this.galleryStore.addImageFromBase64(
+                      b64Data,
+                      mimeType,
+                      session.projectPath,
+                      session.id,
+                    );
+                    if (meta && this.onGalleryImage) {
+                      this.onGalleryImage(meta);
+                    }
+                  }
+                }
+              }
+
+              if (newImages.length > 0) {
+                msg = { ...msg, images: [...existingImages, ...newImages] };
+              }
+            }
+
+            // Strip transient rawContentBlocks before sending to client
+            const { rawContentBlocks: _, ...cleanMsg } = msg;
+            msg = cleanMsg as typeof msg;
           }
         }
 
@@ -339,7 +440,7 @@ export class SessionManager {
             // reconnecting. System messages carry slash commands, permission
             // modes, and other metadata needed to restore client state.
             const idx = session.history.findIndex(
-              m => m.type !== "user_input" && m.type !== "system",
+              (m) => m.type !== "user_input" && m.type !== "system",
             );
             if (idx >= 0) {
               session.history.splice(idx, 1);
@@ -359,7 +460,10 @@ export class SessionManager {
           this.backfillUserUuidsFromDisk(session);
         }
       } catch (err) {
-        console.error(`[session] Error processing message for session ${id}:`, err);
+        console.error(
+          `[session] Error processing message for session ${id}:`,
+          err,
+        );
       }
     });
 
@@ -391,7 +495,10 @@ export class SessionManager {
             await renameCodexSession(session.claudeSessionId, session.name);
           }
         } catch (err) {
-          console.warn(`[session] Failed to re-persist session name on session end:`, err);
+          console.warn(
+            `[session] Failed to re-persist session name on session end:`,
+            err,
+          );
         }
       });
     }
@@ -427,7 +534,9 @@ export class SessionManager {
     // If start() throws, no zombie session is left behind.
     this.sessions.set(id, session);
 
-    console.log(`[session] Created ${effectiveProvider} session ${id} for ${effectiveCwd}${wtPath ? ` (worktree of ${projectPath})` : ""}`);
+    console.log(
+      `[session] Created ${effectiveProvider} session ${id} for ${effectiveCwd}${wtPath ? ` (worktree of ${projectPath})` : ""}`,
+    );
     return id;
   }
 
@@ -438,16 +547,36 @@ export class SessionManager {
   list(): SessionSummary[] {
     return Array.from(this.sessions.values()).map((s) => {
       const processWithPending = s.process as {
-        getPendingPermission?: () => {
-          toolUseId: string;
-          toolName: string;
-          input: Record<string, unknown>;
-        } | undefined;
+        getPendingPermission?: () =>
+          | {
+              toolUseId: string;
+              toolName: string;
+              input: Record<string, unknown>;
+            }
+          | undefined;
       };
       const pendingPermission =
         s.status === "waiting_approval"
           ? processWithPending.getPendingPermission?.()
           : undefined;
+      const executionMode =
+        s.process instanceof SdkProcess
+          ? s.process.permissionMode === "bypassPermissions"
+            ? "fullAccess"
+            : s.process.permissionMode === "acceptEdits"
+              ? "acceptEdits"
+              : "default"
+          : s.process instanceof CodexProcess
+            ? s.process.approvalPolicy === "never"
+              ? "fullAccess"
+              : "default"
+            : undefined;
+      const planMode =
+        s.process instanceof SdkProcess
+          ? s.process.permissionMode === "plan"
+          : s.process instanceof CodexProcess
+            ? s.process.collaborationMode === "plan"
+            : undefined;
       return {
         id: s.id,
         provider: s.provider,
@@ -465,16 +594,24 @@ export class SessionManager {
           s.process instanceof SdkProcess
             ? s.process.permissionMode
             : s.process instanceof CodexProcess
-              ? (s.process.collaborationMode === "plan"
+              ? s.process.collaborationMode === "plan"
                 ? "plan"
                 : s.process.approvalPolicy === "never"
                   ? "bypassPermissions"
-                  : "acceptEdits")
+                  : "acceptEdits"
               : undefined,
-        model: s.process instanceof SdkProcess
-          ? s.process.model
-          : undefined,
+        executionMode,
+        planMode,
+        model: s.process instanceof SdkProcess ? s.process.model : undefined,
         codexSettings: s.codexSettings,
+        agentNickname:
+          s.process instanceof CodexProcess
+            ? (s.process.agentNickname ?? undefined)
+            : undefined,
+        agentRole:
+          s.process instanceof CodexProcess
+            ? (s.process.agentRole ?? undefined)
+            : undefined,
         sandboxEnabled: s.sandboxEnabled,
         pendingPermission,
       };
@@ -501,16 +638,30 @@ export class SessionManager {
           if (typeof msg.content === "string") {
             return msg.content.replace(/\s+/g, " ").trim().slice(0, 100);
           }
-          const content = msg.content as Array<Record<string, unknown>> | undefined;
+          const content = msg.content as
+            | Array<Record<string, unknown>>
+            | undefined;
           const textBlock = content?.find((c) => c.type === "text");
-          if (textBlock?.text) return (textBlock.text as string).replace(/\s+/g, " ").trim().slice(0, 100);
+          if (textBlock?.text)
+            return (textBlock.text as string)
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 100);
         }
       }
     }
     return "";
   }
 
-  getCachedCommands(projectPath: string): { slashCommands: string[]; skills: string[]; skillMetadata?: Array<Record<string, unknown>> } | undefined {
+  getCachedCommands(
+    projectPath: string,
+  ):
+    | {
+        slashCommands: string[];
+        skills: string[];
+        skillMetadata?: Array<Record<string, unknown>>;
+      }
+    | undefined {
     return this.commandCache.get(projectPath);
   }
 
@@ -521,7 +672,12 @@ export class SessionManager {
 
   /** Save worktree mapping when a provider session ID is available. */
   private saveWorktreeMapping(session: SessionInfo): void {
-    if (this.worktreeStore && session.claudeSessionId && session.worktreePath && session.worktreeBranch) {
+    if (
+      this.worktreeStore &&
+      session.claudeSessionId &&
+      session.worktreePath &&
+      session.worktreeBranch
+    ) {
       this.worktreeStore.set(session.claudeSessionId, {
         worktreePath: session.worktreePath,
         worktreeBranch: session.worktreeBranch,
@@ -534,13 +690,20 @@ export class SessionManager {
    * Rewind files to their state at the specified user message.
    * Delegates to the session's SdkProcess.rewindFiles().
    */
-  async rewindFiles(id: string, targetUuid: string, dryRun?: boolean): Promise<RewindFilesResult> {
+  async rewindFiles(
+    id: string,
+    targetUuid: string,
+    dryRun?: boolean,
+  ): Promise<RewindFilesResult> {
     const session = this.sessions.get(id);
     if (!session) {
       return { canRewind: false, error: "Session not found" };
     }
     if (session.provider === "codex") {
-      return { canRewind: false, error: "Rewind is not supported for Codex sessions" };
+      return {
+        canRewind: false,
+        error: "Rewind is not supported for Codex sessions",
+      };
     }
     return (session.process as SdkProcess).rewindFiles(targetUuid, dryRun);
   }
@@ -575,7 +738,9 @@ export class SessionManager {
     // Convert user UUID → following assistant UUID.
     const assistantUuid = this.findAssistantUuidAfterUser(session, targetUuid);
     if (!assistantUuid) {
-      throw new Error("Cannot find assistant message after target user message");
+      throw new Error(
+        "Cannot find assistant message after target user message",
+      );
     }
 
     const projectPath = session.projectPath;
@@ -595,7 +760,9 @@ export class SessionManager {
         resumeSessionAt: assistantUuid,
       },
       undefined,
-      worktreePath ? { existingWorktreePath: worktreePath, worktreeBranch } : undefined,
+      worktreePath
+        ? { existingWorktreePath: worktreePath, worktreeBranch }
+        : undefined,
     );
 
     onReady(newId);
@@ -606,7 +773,10 @@ export class SessionManager {
    *
    * Searches in-memory history first, then pastMessages (disk history).
    */
-  private findAssistantUuidAfterUser(session: SessionInfo, userUuid: string): string | null {
+  private findAssistantUuidAfterUser(
+    session: SessionInfo,
+    userUuid: string,
+  ): string | null {
     // 1. Search in-memory history
     let foundUser = false;
     for (const msg of session.history) {
@@ -693,7 +863,9 @@ export class SessionManager {
         const content = entry.message?.content;
         if (!Array.isArray(content)) continue;
         const texts = content
-          .filter((c: unknown) => (c as Record<string, unknown>).type === "text")
+          .filter(
+            (c: unknown) => (c as Record<string, unknown>).type === "text",
+          )
           .map((c: unknown) => (c as Record<string, unknown>).text as string);
         if (texts.length > 0) {
           const key = texts.join("\n");
@@ -710,7 +882,10 @@ export class SessionManager {
     for (const msg of session.history) {
       if (
         msg.type === "user_input" &&
-        !("userMessageUuid" in msg && (msg as Record<string, unknown>).userMessageUuid)
+        !(
+          "userMessageUuid" in msg &&
+          (msg as Record<string, unknown>).userMessageUuid
+        )
       ) {
         const text = (msg as { text?: string }).text;
         const queue = text ? diskUuids.get(text) : undefined;
@@ -728,9 +903,7 @@ export class SessionManager {
 
     const projectsDir = join(homedir(), ".claude", "projects");
     const fileName = `${session.claudeSessionId}.jsonl`;
-    const slugCandidates = new Set<string>([
-      pathToSlug(session.projectPath),
-    ]);
+    const slugCandidates = new Set<string>([pathToSlug(session.projectPath)]);
 
     // Worktree sessions are persisted under the worktree slug, not projectPath.
     if (session.worktreePath) {

@@ -786,16 +786,15 @@ void main() {
       expect(perm.summary, 'ls -la');
     });
 
-    test('truncates long values', () {
+    test('returns full value without truncation (UI handles display)', () {
+      const longPath =
+          '/very/long/path/that/exceeds/sixty/characters/definitely/yes/indeed/it/does/wow.dart';
       const perm = PermissionRequestMessage(
         toolUseId: 'tu-1',
         toolName: 'Read',
-        input: {
-          'file_path':
-              '/very/long/path/that/exceeds/sixty/characters/definitely/yes/indeed/it/does/wow.dart',
-        },
+        input: {'file_path': longPath},
       );
-      expect(perm.summary.length, lessThanOrEqualTo(63)); // 60 + "..."
+      expect(perm.summary, longPath);
     });
 
     test('falls back to toolName when no recognized keys', () {
@@ -805,6 +804,46 @@ void main() {
         input: {'foo': 'bar'},
       );
       expect(perm.summary, 'CustomTool');
+    });
+
+    test('extracts granular approval detail lines', () {
+      const perm = PermissionRequestMessage(
+        toolUseId: 'tu-2',
+        toolName: 'Bash',
+        input: {
+          'command': 'curl https://example.com',
+          'additionalPermissions': {
+            'fileSystem': {
+              'write': ['/tmp/project'],
+            },
+          },
+          'proposedExecpolicyAmendment': {
+            'mode': 'allow',
+            'note': 'repeat command',
+          },
+          'proposedNetworkPolicyAmendments': [
+            {'host': 'example.com', 'action': 'allow'},
+          ],
+          'availableDecisions': ['accept', 'acceptForSession', 'decline'],
+        },
+      );
+
+      expect(
+        perm.detailLines,
+        contains('Additional permissions: fileSystem.write=/tmp/project'),
+      );
+      expect(
+        perm.detailLines,
+        contains('Exec policy: mode=allow, note=repeat command'),
+      );
+      expect(
+        perm.detailLines,
+        contains('Network policy: host=example.com, action=allow'),
+      );
+      expect(
+        perm.detailLines,
+        contains('Allowed actions: accept, acceptForSession, decline'),
+      );
     });
   });
 

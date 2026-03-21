@@ -4,17 +4,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../l10n/app_localizations.dart';
 import '../../../models/messages.dart';
 import '../../../theme/app_theme.dart';
+import '../state/chat_session_state.dart';
 import '../state/chat_session_cubit.dart';
 
 class SessionModeBar extends StatelessWidget {
-  const SessionModeBar({super.key});
+  final Future<void> Function()? onBeforeRestart;
+
+  const SessionModeBar({super.key, this.onBeforeRestart});
 
   @override
   Widget build(BuildContext context) {
     final chatCubit = context.watch<ChatSessionCubit>();
-    final permissionMode = chatCubit.state.permissionMode;
+    final executionMode = chatCubit.state.executionMode;
+    final planMode = chatCubit.state.planMode;
     final inPlanMode = chatCubit.state.inPlanMode;
     final status = chatCubit.state.status;
     final isActive =
@@ -22,59 +27,100 @@ class SessionModeBar extends StatelessWidget {
         status == ProcessStatus.waitingApproval ||
         status == ProcessStatus.compacting;
     final sandboxMode = chatCubit.state.sandboxMode;
+    final permissionMode = chatCubit.state.permissionMode;
+    final isCodex = chatCubit.provider == Provider.codex;
 
     final cs = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: _PulsingModeBarSurface(
-        inPlanMode: inPlanMode && isActive,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-            child: Container(
-              key: const ValueKey('session_mode_bar_glow'),
-              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-              decoration: BoxDecoration(
-                color: isDark
-                    ? cs.surface.withValues(alpha: 0.6)
-                    : cs.surface.withValues(alpha: 0.7),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isDark
-                      ? Colors.white.withValues(alpha: 0.1)
-                      : Colors.white.withValues(alpha: 0.6),
+    final bar = ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+          decoration: BoxDecoration(
+            color: isDark
+                ? cs.surface.withValues(alpha: 0.6)
+                : cs.surface.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isDark
+                  ? Colors.white.withValues(alpha: 0.1)
+                  : Colors.white.withValues(alpha: 0.6),
+            ),
+          ),
+          child: IntrinsicHeight(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isCodex) ...[
+                  PlanModeChip(
+                    enabled: planMode,
+                    activeGlow: inPlanMode && isActive,
+                    onTap: () => togglePlanMode(
+                      context,
+                      chatCubit,
+                      onBeforeRestart: onBeforeRestart,
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: VerticalDivider(
+                      width: 1,
+                      thickness: 1,
+                      color: cs.outlineVariant.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  ExecutionModeChip(
+                    currentMode: executionMode,
+                    provider: chatCubit.provider,
+                    onTap: () => showExecutionModeMenu(
+                      context,
+                      chatCubit,
+                      onBeforeRestart: onBeforeRestart,
+                    ),
+                  ),
+                ] else ...[
+                  PermissionModeChip(
+                    currentMode: permissionMode,
+                    onTap: () => showPermissionModeMenu(
+                      context,
+                      chatCubit,
+                      onBeforeRestart: onBeforeRestart,
+                    ),
+                  ),
+                ],
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: VerticalDivider(
+                    width: 1,
+                    thickness: 1,
+                    color: cs.outlineVariant.withValues(alpha: 0.4),
+                  ),
                 ),
-              ),
-              child: IntrinsicHeight(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    PermissionModeChip(
-                      currentMode: permissionMode,
-                      onTap: () => showPermissionModeMenu(context, chatCubit),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: VerticalDivider(
-                        width: 1,
-                        thickness: 1,
-                        color: cs.outlineVariant.withValues(alpha: 0.4),
-                      ),
-                    ),
-                    SandboxModeChip(
-                      currentMode: sandboxMode,
-                      provider: chatCubit.provider,
-                      onTap: () => showSandboxModeMenu(context, chatCubit),
-                    ),
-                  ],
+                SandboxModeChip(
+                  currentMode: sandboxMode,
+                  provider: chatCubit.provider,
+                  onTap: () => showSandboxModeMenu(
+                    context,
+                    chatCubit,
+                    onBeforeRestart: onBeforeRestart,
+                  ),
                 ),
-              ),
+              ],
             ),
           ),
         ),
       ),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: isCodex
+          ? bar
+          : _PulsingModeBarSurface(
+              inPlanMode: inPlanMode && isActive,
+              child: bar,
+            ),
     );
   }
 }
@@ -83,7 +129,11 @@ class _PulsingModeBarSurface extends StatefulWidget {
   final bool inPlanMode;
   final Widget child;
 
-  const _PulsingModeBarSurface({required this.inPlanMode, required this.child});
+  const _PulsingModeBarSurface({
+    super.key,
+    required this.inPlanMode,
+    required this.child,
+  });
 
   @override
   State<_PulsingModeBarSurface> createState() => _PulsingModeBarSurfaceState();
@@ -243,32 +293,39 @@ class _RotatingBorderPainter extends CustomPainter {
       oldDelegate.progress != progress;
 }
 
-void showPermissionModeMenu(BuildContext context, ChatSessionCubit chatCubit) {
-  final currentMode = chatCubit.state.permissionMode;
-  final appColors = Theme.of(context).extension<AppColors>()!;
+void showExecutionModeMenu(
+  BuildContext context,
+  ChatSessionCubit chatCubit, {
+  Future<void> Function()? onBeforeRestart,
+}) {
+  if (chatCubit.provider != Provider.codex) {
+    showPermissionModeMenu(
+      context,
+      chatCubit,
+      onBeforeRestart: onBeforeRestart,
+    );
+    return;
+  }
+  final currentMode = chatCubit.state.executionMode;
+  final l = AppLocalizations.of(context);
 
   const purple = Color(0xFFBB86FC);
 
   final modeDetails =
-      <PermissionMode, ({IconData icon, String description, Color color})>{
-        PermissionMode.defaultMode: (
+      <ExecutionMode, ({IconData icon, String description, Color color})>{
+        ExecutionMode.defaultMode: (
           icon: Icons.tune,
-          description: 'Standard permission prompts',
+          description: l.executionDefaultDescription,
           color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
-        PermissionMode.acceptEdits: (
+        ExecutionMode.acceptEdits: (
           icon: Icons.edit_note,
-          description: 'Auto-approve file edits',
+          description: l.executionAcceptEditsDescription,
           color: purple,
         ),
-        PermissionMode.plan: (
-          icon: Icons.assignment,
-          description: 'Analyze & plan without executing',
-          color: appColors.statusPlan,
-        ),
-        PermissionMode.bypassPermissions: (
+        ExecutionMode.fullAccess: (
           icon: Icons.flash_on,
-          description: 'Skip all permission prompts',
+          description: l.executionFullAccessDescription,
           color: Theme.of(context).colorScheme.error,
         ),
       };
@@ -286,7 +343,350 @@ void showPermissionModeMenu(BuildContext context, ChatSessionCubit chatCubit) {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Permission Mode',
+                  'Execution',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: sheetCs.onSurface,
+                  ),
+                ),
+              ),
+            ),
+            for (final mode
+                in chatCubit.isCodex
+                    ? const [
+                        ExecutionMode.defaultMode,
+                        ExecutionMode.fullAccess,
+                      ]
+                    : ExecutionMode.values)
+              ListTile(
+                leading: Icon(
+                  modeDetails[mode]!.icon,
+                  color: mode == currentMode
+                      ? modeDetails[mode]!.color
+                      : sheetCs.onSurfaceVariant,
+                ),
+                title: Text(mode.label),
+                subtitle: Text(
+                  modeDetails[mode]!.description,
+                  style: const TextStyle(fontSize: 12),
+                ),
+                trailing: mode == currentMode
+                    ? Icon(
+                        Icons.check,
+                        color: modeDetails[mode]!.color,
+                        size: 20,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  if (mode == currentMode) return;
+                  HapticFeedback.lightImpact();
+                  _confirmExecutionModeChange(
+                    context,
+                    chatCubit,
+                    mode,
+                    onBeforeRestart: onBeforeRestart,
+                  );
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+/// Show confirmation dialog before changing permission mode for Codex sessions,
+/// because the change requires a session restart (like sandbox mode).
+Future<void> _confirmExecutionModeChange(
+  BuildContext context,
+  ChatSessionCubit chatCubit,
+  ExecutionMode mode, {
+  Future<void> Function()? onBeforeRestart,
+}) async {
+  final l = AppLocalizations.of(context);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) {
+      final cs = Theme.of(dialogContext).colorScheme;
+      return AlertDialog(
+        title: Text(l.changeExecutionModeTitle),
+        content: Text(l.changeExecutionModeBody(mode.label)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(l.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: mode == ExecutionMode.fullAccess
+                ? FilledButton.styleFrom(backgroundColor: cs.error)
+                : null,
+            child: Text(l.restart),
+          ),
+        ],
+      );
+    },
+  );
+  if (confirmed == true) {
+    await onBeforeRestart?.call();
+    chatCubit.setSessionModes(executionMode: mode);
+  }
+}
+
+Future<void> togglePlanMode(
+  BuildContext context,
+  ChatSessionCubit chatCubit, {
+  Future<void> Function()? onBeforeRestart,
+}) async {
+  final nextPlanMode = !chatCubit.state.planMode;
+  final hasPendingApproval = chatCubit.state.approval is! ApprovalNone;
+  final l = AppLocalizations.of(context);
+  final canToggleInPlace =
+      chatCubit.isCodex &&
+      chatCubit.state.status == ProcessStatus.idle &&
+      !hasPendingApproval;
+
+  if (canToggleInPlace) {
+    HapticFeedback.lightImpact();
+    chatCubit.setSessionModes(planMode: nextPlanMode);
+    return;
+  }
+
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) {
+      return AlertDialog(
+        title: Text(
+          nextPlanMode ? l.enablePlanModeTitle : l.disablePlanModeTitle,
+        ),
+        content: Text(
+          nextPlanMode ? l.enablePlanModeBody : l.disablePlanModeBody,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(l.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(l.restart),
+          ),
+        ],
+      );
+    },
+  );
+  if (confirmed == true) {
+    await onBeforeRestart?.call();
+    chatCubit.setSessionModes(planMode: nextPlanMode);
+  }
+}
+
+void showSandboxModeMenu(
+  BuildContext context,
+  ChatSessionCubit chatCubit, {
+  Future<void> Function()? onBeforeRestart,
+}) {
+  final currentMode = chatCubit.state.sandboxMode;
+  final isClaude = chatCubit.provider != Provider.codex;
+  final l = AppLocalizations.of(context);
+
+  showModalBottomSheet(
+    context: context,
+    builder: (sheetContext) {
+      final sheetCs = Theme.of(sheetContext).colorScheme;
+      return SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Sandbox',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: sheetCs.onSurface,
+                  ),
+                ),
+              ),
+            ),
+            for (final mode
+                in isClaude ? SandboxMode.values.reversed : SandboxMode.values)
+              ListTile(
+                leading: Icon(
+                  _sandboxMenuIcon(mode, isClaude),
+                  color: mode == currentMode
+                      ? sheetCs.primary
+                      : _sandboxMenuIconColor(mode, isClaude, sheetCs),
+                ),
+                title: Text(
+                  _sandboxMenuTitle(mode, isClaude),
+                  style: TextStyle(
+                    color:
+                        !isClaude &&
+                            mode == SandboxMode.off &&
+                            currentMode != mode
+                        ? sheetCs.error
+                        : null,
+                  ),
+                ),
+                subtitle: Text(
+                  _sandboxMenuSubtitle(mode, isClaude, l),
+                  style: const TextStyle(fontSize: 12),
+                ),
+                trailing: mode == currentMode
+                    ? Icon(Icons.check, color: sheetCs.primary, size: 20)
+                    : null,
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  if (mode == currentMode) return;
+                  HapticFeedback.lightImpact();
+                  _confirmSandboxModeChange(
+                    context,
+                    chatCubit,
+                    mode,
+                    isClaude: isClaude,
+                    onBeforeRestart: onBeforeRestart,
+                  );
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+IconData _sandboxMenuIcon(SandboxMode mode, bool isClaude) {
+  if (mode == SandboxMode.on) return Icons.shield_outlined;
+  return isClaude ? Icons.code : Icons.warning_amber;
+}
+
+Color _sandboxMenuIconColor(SandboxMode mode, bool isClaude, ColorScheme cs) {
+  if (mode == SandboxMode.off && !isClaude) return cs.error;
+  return cs.onSurfaceVariant;
+}
+
+String _sandboxMenuTitle(SandboxMode mode, bool isClaude) {
+  if (isClaude) {
+    return mode == SandboxMode.on ? 'Sandbox (Safe Mode)' : 'Standard';
+  }
+  return mode == SandboxMode.on ? 'Sandbox On' : 'Sandbox Off';
+}
+
+String _sandboxMenuSubtitle(
+  SandboxMode mode,
+  bool isClaude,
+  AppLocalizations l,
+) {
+  if (isClaude) {
+    return mode == SandboxMode.on
+        ? l.sandboxRestrictedDescription
+        : l.sandboxNativeDescription;
+  }
+  return mode == SandboxMode.on
+      ? l.sandboxRestrictedDescription
+      : l.sandboxNativeCautionDescription;
+}
+
+/// Show confirmation dialog before changing sandbox mode, because
+/// the change requires a session restart (thread/resume with new sandbox).
+Future<void> _confirmSandboxModeChange(
+  BuildContext context,
+  ChatSessionCubit chatCubit,
+  SandboxMode mode, {
+  bool isClaude = false,
+  Future<void> Function()? onBeforeRestart,
+}) async {
+  final l = AppLocalizations.of(context);
+  final modeLabel = isClaude
+      ? (mode == SandboxMode.on ? 'Sandbox (Safe Mode)' : 'Standard')
+      : mode.label;
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) {
+      final cs = Theme.of(dialogContext).colorScheme;
+      // For Codex, turning off sandbox is dangerous (red button).
+      // For Claude, turning off is standard — no red.
+      final useErrorStyle = mode == SandboxMode.off && !isClaude;
+      return AlertDialog(
+        title: Text(l.changeSandboxModeTitle),
+        content: Text(l.changeSandboxModeBody(modeLabel)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(l.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: useErrorStyle
+                ? FilledButton.styleFrom(backgroundColor: cs.error)
+                : null,
+            child: Text(l.restart),
+          ),
+        ],
+      );
+    },
+  );
+  if (confirmed == true) {
+    await onBeforeRestart?.call();
+    chatCubit.setSandboxMode(mode);
+  }
+}
+
+void showPermissionModeMenu(
+  BuildContext context,
+  ChatSessionCubit chatCubit, {
+  Future<void> Function()? onBeforeRestart,
+}) {
+  final currentMode = chatCubit.state.permissionMode;
+  final l = AppLocalizations.of(context);
+  const purple = Color(0xFFBB86FC);
+
+  final modeDetails =
+      <PermissionMode, ({IconData icon, String description, Color color})>{
+        PermissionMode.defaultMode: (
+          icon: Icons.tune,
+          description: l.permissionDefaultDescription,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        PermissionMode.acceptEdits: (
+          icon: Icons.edit_note,
+          description: l.permissionAcceptEditsDescription,
+          color: purple,
+        ),
+        PermissionMode.plan: (
+          icon: Icons.assignment_outlined,
+          description: l.permissionPlanDescription,
+          color: Theme.of(context).extension<AppColors>()!.statusPlan,
+        ),
+        PermissionMode.bypassPermissions: (
+          icon: Icons.flash_on,
+          description: l.permissionBypassDescription,
+          color: Theme.of(context).colorScheme.error,
+        ),
+      };
+
+  showModalBottomSheet(
+    context: context,
+    builder: (sheetContext) {
+      final sheetCs = Theme.of(sheetContext).colorScheme;
+      return SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Permission',
                   style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
@@ -319,121 +719,11 @@ void showPermissionModeMenu(BuildContext context, ChatSessionCubit chatCubit) {
                   Navigator.pop(sheetContext);
                   if (mode == currentMode) return;
                   HapticFeedback.lightImpact();
-                  if (chatCubit.isCodex) {
-                    _confirmPermissionModeChange(context, chatCubit, mode);
-                  } else {
-                    chatCubit.setPermissionMode(mode);
-                  }
-                },
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      );
-    },
-  );
-}
-
-/// Show confirmation dialog before changing permission mode for Codex sessions,
-/// because the change requires a session restart (like sandbox mode).
-Future<void> _confirmPermissionModeChange(
-  BuildContext context,
-  ChatSessionCubit chatCubit,
-  PermissionMode mode,
-) async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-    builder: (dialogContext) {
-      final cs = Theme.of(dialogContext).colorScheme;
-      return AlertDialog(
-        title: const Text('Change Permission Mode'),
-        content: Text(
-          'Switching to ${mode.label} will restart the session. '
-          'Your conversation will be preserved.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            style: mode == PermissionMode.bypassPermissions
-                ? FilledButton.styleFrom(backgroundColor: cs.error)
-                : null,
-            child: const Text('Restart'),
-          ),
-        ],
-      );
-    },
-  );
-  if (confirmed == true) {
-    chatCubit.setPermissionMode(mode);
-  }
-}
-
-void showSandboxModeMenu(BuildContext context, ChatSessionCubit chatCubit) {
-  final currentMode = chatCubit.state.sandboxMode;
-  final isClaude = chatCubit.provider != Provider.codex;
-
-  showModalBottomSheet(
-    context: context,
-    builder: (sheetContext) {
-      final sheetCs = Theme.of(sheetContext).colorScheme;
-      return SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Sandbox Mode',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: sheetCs.onSurface,
-                  ),
-                ),
-              ),
-            ),
-            for (final mode
-                in isClaude ? SandboxMode.values.reversed : SandboxMode.values)
-              ListTile(
-                leading: Icon(
-                  _sandboxMenuIcon(mode, isClaude),
-                  color: mode == currentMode
-                      ? sheetCs.primary
-                      : _sandboxMenuIconColor(mode, isClaude, sheetCs),
-                ),
-                title: Text(
-                  _sandboxMenuTitle(mode, isClaude),
-                  style: TextStyle(
-                    color:
-                        !isClaude &&
-                            mode == SandboxMode.off &&
-                            currentMode != mode
-                        ? sheetCs.error
-                        : null,
-                  ),
-                ),
-                subtitle: Text(
-                  _sandboxMenuSubtitle(mode, isClaude),
-                  style: const TextStyle(fontSize: 12),
-                ),
-                trailing: mode == currentMode
-                    ? Icon(Icons.check, color: sheetCs.primary, size: 20)
-                    : null,
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  if (mode == currentMode) return;
-                  HapticFeedback.lightImpact();
-                  _confirmSandboxModeChange(
+                  _confirmPermissionModeChange(
                     context,
                     chatCubit,
                     mode,
-                    isClaude: isClaude,
+                    onBeforeRestart: onBeforeRestart,
                   );
                 },
               ),
@@ -445,76 +735,39 @@ void showSandboxModeMenu(BuildContext context, ChatSessionCubit chatCubit) {
   );
 }
 
-IconData _sandboxMenuIcon(SandboxMode mode, bool isClaude) {
-  if (mode == SandboxMode.on) return Icons.shield_outlined;
-  return isClaude ? Icons.code : Icons.warning_amber;
-}
-
-Color _sandboxMenuIconColor(SandboxMode mode, bool isClaude, ColorScheme cs) {
-  if (mode == SandboxMode.off && !isClaude) return cs.error;
-  return cs.onSurfaceVariant;
-}
-
-String _sandboxMenuTitle(SandboxMode mode, bool isClaude) {
-  if (isClaude) {
-    return mode == SandboxMode.on ? 'Sandbox (Safe Mode)' : 'Standard';
-  }
-  return mode == SandboxMode.on ? 'Sandbox On' : 'Sandbox Off';
-}
-
-String _sandboxMenuSubtitle(SandboxMode mode, bool isClaude) {
-  if (isClaude) {
-    return mode == SandboxMode.on
-        ? 'Run commands in restricted environment'
-        : 'Run commands natively';
-  }
-  return mode == SandboxMode.on
-      ? 'Run commands in restricted environment'
-      : 'Run commands natively (CAUTION)';
-}
-
-/// Show confirmation dialog before changing sandbox mode, because
-/// the change requires a session restart (thread/resume with new sandbox).
-Future<void> _confirmSandboxModeChange(
+Future<void> _confirmPermissionModeChange(
   BuildContext context,
   ChatSessionCubit chatCubit,
-  SandboxMode mode, {
-  bool isClaude = false,
+  PermissionMode mode, {
+  Future<void> Function()? onBeforeRestart,
 }) async {
-  final modeLabel = isClaude
-      ? (mode == SandboxMode.on ? 'Sandbox (Safe Mode)' : 'Standard')
-      : mode.label;
+  final l = AppLocalizations.of(context);
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (dialogContext) {
       final cs = Theme.of(dialogContext).colorScheme;
-      // For Codex, turning off sandbox is dangerous (red button).
-      // For Claude, turning off is standard — no red.
-      final useErrorStyle = mode == SandboxMode.off && !isClaude;
       return AlertDialog(
-        title: const Text('Change Sandbox Mode'),
-        content: Text(
-          'Switching to $modeLabel will restart the session. '
-          'Your conversation will be preserved.',
-        ),
+        title: Text(l.changePermissionModeTitle),
+        content: Text(l.changePermissionModeBody(mode.label)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
+            child: Text(l.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            style: useErrorStyle
+            style: mode == PermissionMode.bypassPermissions
                 ? FilledButton.styleFrom(backgroundColor: cs.error)
                 : null,
-            child: const Text('Restart'),
+            child: Text(l.restart),
           ),
         ],
       );
     },
   );
   if (confirmed == true) {
-    chatCubit.setSandboxMode(mode);
+    await onBeforeRestart?.call();
+    chatCubit.setPermissionMode(mode);
   }
 }
 
@@ -531,10 +784,8 @@ class PermissionModeChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final appColors = Theme.of(context).extension<AppColors>()!;
-
-    // Colors aligned with Claude Code CLI
     const purple = Color(0xFFBB86FC);
+    final plan = Theme.of(context).extension<AppColors>()!.statusPlan;
 
     final (IconData icon, String label, Color fg) = switch (currentMode) {
       PermissionMode.defaultMode => (
@@ -543,7 +794,7 @@ class PermissionModeChip extends StatelessWidget {
         cs.onSurfaceVariant,
       ),
       PermissionMode.acceptEdits => (Icons.edit_note, 'Edits', purple),
-      PermissionMode.plan => (Icons.assignment, 'Plan', appColors.statusPlan),
+      PermissionMode.plan => (Icons.assignment_outlined, 'Plan', plan),
       PermissionMode.bypassPermissions => (Icons.flash_on, 'Bypass', cs.error),
     };
 
@@ -577,6 +828,120 @@ class PermissionModeChip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class ExecutionModeChip extends StatelessWidget {
+  final ExecutionMode currentMode;
+  final Provider? provider;
+  final VoidCallback onTap;
+
+  const ExecutionModeChip({
+    super.key,
+    required this.currentMode,
+    this.provider,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    // Colors aligned with Claude Code CLI
+    const purple = Color(0xFFBB86FC);
+
+    final (IconData icon, String label, Color fg) = switch (currentMode) {
+      ExecutionMode.defaultMode => (Icons.tune, 'Default', cs.onSurfaceVariant),
+      ExecutionMode.acceptEdits => (Icons.edit_note, 'Edits', purple),
+      ExecutionMode.fullAccess => (Icons.flash_on, 'Full', cs.error),
+    };
+
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(10),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: fg),
+              const SizedBox(width: 3),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: fg,
+                ),
+              ),
+              Icon(
+                Icons.arrow_drop_down,
+                size: 14,
+                color: fg.withValues(alpha: 0.5),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class PlanModeChip extends StatelessWidget {
+  final bool enabled;
+  final bool activeGlow;
+  final VoidCallback onTap;
+
+  const PlanModeChip({
+    super.key,
+    required this.enabled,
+    this.activeGlow = false,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final appColors = Theme.of(context).extension<AppColors>()!;
+    final cs = Theme.of(context).colorScheme;
+    final fg = enabled ? appColors.statusPlan : cs.onSurfaceVariant;
+
+    final chip = Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(10),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.assignment_outlined, size: 13, color: fg),
+              const SizedBox(width: 3),
+              Text(
+                enabled ? 'Plan On' : 'Plan Off',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: fg,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (!activeGlow) return chip;
+
+    return _PulsingModeBarSurface(
+      key: const ValueKey('plan_mode_chip_glow'),
+      inPlanMode: true,
+      child: chip,
     );
   }
 }

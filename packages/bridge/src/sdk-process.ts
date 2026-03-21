@@ -11,6 +11,7 @@ import {
   type PermissionMode,
 } from "./parser.js";
 import {
+  getClaudeAuthStatus,
   getValidClaudeAccessToken,
   validateClaudeAccessToken,
 } from "./usage.js";
@@ -176,34 +177,21 @@ export function buildAuthError(
  * Returns authenticated=false with a message when login is required.
  */
 async function checkClaudeAuth(): Promise<AuthCheckResult> {
-  // Skip auth check when using API key directly
+  // API key authentication — always allowed.
   if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
     return { authenticated: true };
   }
-  try {
-    // getValidClaudeAccessToken() handles expiry detection + refresh + save
-    // in a single serialised flow (with mutex to prevent concurrent refreshes).
-    await getValidClaudeAccessToken();
 
-    // Probe the upstream API to catch revoked tokens that haven't expired yet.
-    // validateClaudeAccessToken() re-reads the (now-fresh) credentials from
-    // disk and will attempt one more refresh if the probe returns 401/403.
-    const validation = await validateClaudeAccessToken();
-    if (!validation.ok) {
-      return buildAuthError("general", validation.detail);
-    }
-    return { authenticated: true };
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    // Distinguish between missing credentials and refresh failure
-    if (detail.includes("not found")) {
-      return buildAuthError("no_credentials");
-    }
-    if (detail.includes("refresh token") || detail.includes("No OAuth")) {
-      return buildAuthError("token_expired");
-    }
-    return buildAuthError("general", detail);
-  }
+  // Subscription (OAuth) authentication is temporarily disabled pending
+  // official clarification from Anthropic on third-party SDK usage policy.
+  // See: https://code.claude.com/docs/en/legal-and-compliance
+  //
+  // Users should set ANTHROPIC_API_KEY instead.
+  return {
+    authenticated: false,
+    errorCode: "auth_api_error",
+    message: "⚠ API key required\n\nSubscription-based authentication is temporarily unavailable while we await policy clarification from Anthropic.\n\nPlease set the ANTHROPIC_API_KEY environment variable on the Bridge machine.\nhttps://console.anthropic.com/settings/keys",
+  };
 }
 
 export interface StartOptions {

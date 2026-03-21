@@ -37,6 +37,11 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   /// completes ([ResultMessage]).
   final _respondedToolUseIds = <String>{};
 
+  PermissionMode? _pendingPermissionRollback;
+  ExecutionMode? _pendingExecutionRollback;
+  bool? _pendingPlanRollback;
+  SandboxMode? _pendingSandboxRollback;
+
   /// Whether this session is a Codex session.
   bool get isCodex => provider == Provider.codex;
 
@@ -52,6 +57,11 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
        super(
          ChatSessionState(
            permissionMode: initialPermissionMode ?? PermissionMode.defaultMode,
+           executionMode: deriveExecutionMode(
+             provider: provider?.value,
+             permissionMode: initialPermissionMode?.value,
+           ),
+           planMode: initialPermissionMode == PermissionMode.plan,
            sandboxMode:
                initialSandboxMode ??
                (provider == Provider.codex ? SandboxMode.on : SandboxMode.off),
@@ -87,6 +97,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     // Log errors prominently
     if (msg is ErrorMessage) {
       logger.error('[session:$sessionId] Error from bridge: ${msg.message}');
+      _rollbackFailedModeChange(msg);
     }
 
     // Prevent duplicate past_history processing
@@ -387,6 +398,8 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         totalDuration: usage.totalDuration,
         inPlanMode: update.inPlanMode ?? current.inPlanMode,
         permissionMode: update.permissionMode ?? current.permissionMode,
+        executionMode: update.executionMode ?? current.executionMode,
+        planMode: update.planMode ?? current.planMode,
         slashCommands: update.slashCommands ?? current.slashCommands,
         claudeSessionId: newClaudeSessionId,
         hiddenToolUseIds: hiddenToolUseIds,
@@ -553,6 +566,8 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
         final msg = entry.message;
         if (msg is PermissionRequestMessage) {
           pendingPermissions[msg.toolUseId] = msg;
+        } else if (msg is PermissionResolvedMessage) {
+          resolvedIds.add(msg.toolUseId);
         } else if (msg is ToolResultMessage) {
           resolvedIds.add(msg.toolUseId);
         }
@@ -564,6 +579,14 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       pendingPermissions.remove(id);
     }
 
+    final resolvedPermissionMode = exitPlanModeResolved
+        ? legacyPermissionModeFromModes(
+            provider ?? Provider.claude,
+            executionMode: state.executionMode,
+            planMode: false,
+          )
+        : state.permissionMode;
+
     if (pendingPermissions.isNotEmpty) {
       final next = pendingPermissions.values.first;
       emit(
@@ -572,6 +595,10 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
             toolUseId: next.toolUseId,
             request: next,
           ),
+          permissionMode: resolvedPermissionMode,
+          planMode: next.toolName == 'ExitPlanMode'
+              ? true
+              : (exitPlanModeResolved ? false : state.planMode),
           inPlanMode: next.toolName == 'ExitPlanMode'
               ? true
               : (exitPlanModeResolved ? false : state.inPlanMode),
@@ -581,6 +608,8 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
       emit(
         state.copyWith(
           approval: const ApprovalState.none(),
+          permissionMode: resolvedPermissionMode,
+          planMode: exitPlanModeResolved ? false : state.planMode,
           inPlanMode: exitPlanModeResolved ? false : state.inPlanMode,
         ),
       );
@@ -634,6 +663,7 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
   /// Change permission mode for Claude sessions.
   void setPermissionMode(PermissionMode mode) {
     logger.info('[session:$sessionId] setPermissionMode=${mode.value}');
+    _pendingPermissionRollback = state.permissionMode;
     emit(
       state.copyWith(
         permissionMode: mode,
@@ -652,10 +682,65 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     }
   }
 
+  void setSessionModes({ExecutionMode? executionMode, bool? planMode}) {
+    final nextExecution = executionMode ?? state.executionMode;
+    final nextPlanMode = planMode ?? state.planMode;
+    final legacyMode = legacyPermissionModeFromModes(
+      provider ?? Provider.claude,
+      executionMode: nextExecution,
+      planMode: nextPlanMode,
+    );
+
+    logger.info(
+      '[session:$sessionId] setSessionModes '
+      'execution=${nextExecution.value} plan=$nextPlanMode',
+    );
+
+    _pendingPermissionRollback = state.permissionMode;
+    _pendingExecutionRollback = state.executionMode;
+    _pendingPlanRollback = state.planMode;
+
+    emit(
+      state.copyWith(
+        permissionMode: legacyMode,
+        executionMode: nextExecution,
+        planMode: nextPlanMode,
+        inPlanMode: nextPlanMode,
+      ),
+    );
+    _bridge.patchSessionModes(
+      sessionId,
+      permissionMode: legacyMode.value,
+      executionMode: nextExecution.value,
+      planMode: nextPlanMode,
+    );
+    _bridge.send(
+      ClientMessage.setSessionMode(
+        legacyMode: legacyMode.value,
+        executionMode: nextExecution.value,
+        planMode: nextPlanMode,
+        sessionId: sessionId,
+      ),
+    );
+
+    final claudeSid = state.claudeSessionId;
+    if (claudeSid != null && claudeSid.isNotEmpty) {
+      _SessionSettingsHelper.save(claudeSid, {
+        'permissionMode': legacyMode.value,
+        'executionMode': nextExecution.value,
+        'planMode': nextPlanMode,
+      });
+    }
+  }
+
   /// Change sandbox mode (Claude & Codex).
   /// Bridge destroys and resumes the session with new sandbox settings.
   void setSandboxMode(SandboxMode mode) {
+    _pendingSandboxRollback = state.sandboxMode;
     emit(state.copyWith(sandboxMode: mode));
+    if (isCodex) {
+      _bridge.patchSessionSandboxMode(sessionId, mode.value);
+    }
     _bridge.send(
       ClientMessage.setSandboxMode(mode.value, sessionId: sessionId),
     );
@@ -664,6 +749,76 @@ class ChatSessionCubit extends Cubit<ChatSessionState> {
     if (claudeSid != null && claudeSid.isNotEmpty) {
       _SessionSettingsHelper.save(claudeSid, {'sandboxMode': mode.value});
     }
+  }
+
+  void _rollbackFailedModeChange(ErrorMessage msg) {
+    if (_isPermissionModeFailure(msg)) {
+      final previous = _pendingPermissionRollback;
+      _pendingPermissionRollback = null;
+      if (previous != null) {
+        emit(
+          state.copyWith(
+            permissionMode: previous,
+            executionMode: _pendingExecutionRollback ?? state.executionMode,
+            planMode: _pendingPlanRollback ?? (previous == PermissionMode.plan),
+            inPlanMode:
+                _pendingPlanRollback ?? (previous == PermissionMode.plan),
+          ),
+        );
+        _bridge.patchSessionModes(
+          sessionId,
+          permissionMode: previous.value,
+          executionMode:
+              (_pendingExecutionRollback ?? state.executionMode).value,
+          planMode: _pendingPlanRollback ?? (previous == PermissionMode.plan),
+        );
+        final claudeSid = state.claudeSessionId;
+        if (claudeSid != null && claudeSid.isNotEmpty) {
+          _SessionSettingsHelper.save(claudeSid, {
+            'permissionMode': previous.value,
+            'executionMode':
+                (_pendingExecutionRollback ?? state.executionMode).value,
+            'planMode':
+                _pendingPlanRollback ?? (previous == PermissionMode.plan),
+          });
+        }
+      }
+      _pendingExecutionRollback = null;
+      _pendingPlanRollback = null;
+    }
+
+    if (_isSandboxModeFailure(msg)) {
+      final previous = _pendingSandboxRollback;
+      _pendingSandboxRollback = null;
+      if (previous != null) {
+        emit(state.copyWith(sandboxMode: previous));
+        if (isCodex) {
+          _bridge.patchSessionSandboxMode(sessionId, previous.value);
+        }
+        final claudeSid = state.claudeSessionId;
+        if (claudeSid != null && claudeSid.isNotEmpty) {
+          _SessionSettingsHelper.save(claudeSid, {
+            'sandboxMode': previous.value,
+          });
+        }
+      }
+    }
+  }
+
+  bool _isPermissionModeFailure(ErrorMessage msg) {
+    return msg.errorCode == 'set_permission_mode_rejected' ||
+        msg.message.startsWith('Failed to set permission mode:') ||
+        msg.message.startsWith(
+          'Failed to restart session for permission mode change:',
+        );
+  }
+
+  bool _isSandboxModeFailure(ErrorMessage msg) {
+    return msg.errorCode == 'set_sandbox_mode_rejected' ||
+        msg.message.startsWith('Failed to set sandbox mode:') ||
+        msg.message.startsWith(
+          'Failed to restart session for sandbox mode change:',
+        );
   }
 
   /// Stop the session.

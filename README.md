@@ -1,8 +1,8 @@
 # CC Pocket
 
-CC Pocket lets you start and run Claude Code and Codex sessions entirely from your phone. No laptop needed — just open the app, pick a project, and code from anywhere.
+CC Pocket lets you start and run Codex and Claude Code sessions entirely from your phone. No laptop needed — just open the app, pick a project, and code from anywhere.
 
-[日本語版 README](README.ja.md)
+[日本語版 README](README.ja.md) | [简体中文版 README](README.zh-CN.md)
 
 <p align="center">
   <img src="docs/images/screenshots.png" alt="CC Pocket screenshots" width="800">
@@ -16,7 +16,7 @@ AI coding agents are getting autonomous enough to write entire features on their
 
 Decisions don't need a keyboard. They need a screen and a thumb.
 
-CC Pocket is built for this workflow: start a session from your phone, let your machine's Claude Code or Codex do the heavy lifting, and make decisions from wherever you are.
+CC Pocket is built for this workflow: start a session from your phone, let your machine's Codex or Claude Code do the heavy lifting, and make decisions from wherever you are.
 
 ## Who It's For
 
@@ -67,13 +67,17 @@ CC Pocket takes a different approach: **sessions start on your phone and run to 
 
 ### 1. Start the Bridge Server
 
-Install [Node.js](https://nodejs.org/) 18+ and at least one CLI provider ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex)) on your host machine, then run:
+Install [Node.js](https://nodejs.org/) 18+ and at least one CLI provider ([Codex](https://github.com/openai/codex) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code)) on your host machine, then run:
 
 ```bash
 npx @ccpocket/bridge@latest
 ```
 
 The server prints a QR code you can scan from the app to connect instantly.
+
+> Warning
+> `@ccpocket/bridge` versions older than `1.25.0` are deprecated for new installs due to potential Anthropic policy concerns around OAuth-based usage.
+> Use `>=1.25.0` and configure `ANTHROPIC_API_KEY` instead of OAuth.
 
 ### 2. Install the Mobile App
 
@@ -271,6 +275,7 @@ cd apps/mobile && flutter pub get && cd ../..
 | `BRIDGE_ALLOWED_DIRS` | `$HOME` | Allowed project directories, comma-separated |
 | `DIFF_IMAGE_AUTO_DISPLAY_KB` | `1024` | Auto-display threshold for image diffs |
 | `DIFF_IMAGE_MAX_SIZE_MB` | `5` | Max image size for diff previews |
+| `BRIDGE_ENABLE_USAGE` | unset | Enables Claude usage tracking via the Anthropic API. **This makes direct API calls to Anthropic outside the Claude Agent SDK. Use at your own risk.** |
 
 ## License
 

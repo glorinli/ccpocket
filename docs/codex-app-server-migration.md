@@ -54,8 +54,54 @@ Additional full-suite run:
 
 Result: one unrelated existing failure in `src/version.test.ts` (expected version mismatch).
 
+## Latest Catch-up (2026-03-19)
+
+- Local Codex clone updated to `openai/codex@903660edb` (`main`)
+- `app-server-protocol` now exposes a broader v2 request/notification surface than the bridge currently consumes
+
+### Protocol deltas relevant to ccpocket
+
+1. Approval response shapes changed
+   - Command/file approvals now use `decision: "acceptForSession"` instead of the older `acceptSettings.forSession` style.
+   - Command approvals may also offer `availableDecisions`, `proposedExecpolicyAmendment`, and `proposedNetworkPolicyAmendments`.
+2. New server requests were added
+   - `item/permissions/requestApproval`
+   - `mcpServer/elicitation/request`
+   - `item/tool/call` (experimental)
+3. New lifecycle notifications were added
+   - `serverRequest/resolved`
+   - `hook/started`, `hook/completed`
+   - `item/autoApprovalReview/*`
+   - `account/updated`, `account/rateLimits/updated`
+   - realtime notifications under `thread/realtime/*`
+4. Thread bootstrap contract expanded
+   - `thread/start` / `thread/resume` support `persistExtendedHistory`
+   - `thread/start` requires `experimentalRawEvents` and `persistExtendedHistory` in the generated v2 schema
+5. Approval policy surface expanded
+   - `AskForApproval` now includes granular policy flags such as `request_permissions` and `mcp_elicitations`
+
+### Current bridge gaps
+
+- `packages/bridge/src/codex-process.ts` now also handles:
+  - `item/permissions/requestApproval`
+  - `mcpServer/elicitation/request`
+  - `serverRequest/resolved`
+- `approveAlways()` now emits latest `decision: "acceptForSession"` for command/file approvals.
+- Thread bootstrap now opts into `persistExtendedHistory`.
+- Remaining gaps:
+  - `item/tool/call` / `dynamicToolCall` is normalized into tool history, but there is still no dedicated mobile affordance beyond generic tool-use/result rendering.
+  - Permission UI now surfaces amendment summaries, but still does not offer dedicated controls for choosing among protocol-level policy amendment variants.
+  - Codex-only recent sessions now prefer `thread/list`, but mixed/all-provider recent session loading still depends on rollout scanning instead of a unified app-server-backed index.
+
+### Recommended next implementation slice
+
+1. Decide whether dynamic tools need dedicated mobile UI instead of the current generic tool history rendering.
+2. Decide whether ccpocket wants interactive controls for granular approval policy amendments instead of summary-only display.
+3. Decide whether all-provider recent-session fetching should move off rollout scanning.
+4. Add real Codex E2E coverage for permissions + elicitation flows on mobile.
+
 ## Follow-ups
 
 1. Add optional backend flag (`CODEX_BACKEND=sdk|app-server`) if rollback path is required.
 2. Add E2E scenario with a real Codex session and actual approval UI interaction on mobile.
-3. Verify optional app-server fields (`webSearchMode`, network policy) against pinned Codex CLI version in production.
+3. Verify optional app-server fields (`webSearchMode`, network policy, `persistExtendedHistory`) against pinned Codex CLI version in production.

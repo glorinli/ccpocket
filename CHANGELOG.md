@@ -4,6 +4,78 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.45.0] - 2026-03-20
+
+### Added
+- Redesigned session modes around Codex-style Execution and Plan controls
+- Clarified approval dialog labels with explicit "Allow Once" and session-scoped approval wording
+
+### Fixed
+- Rolled back session mode changes locally when a Bridge mode update fails
+
+## [1.44.1] - 2026-03-20
+
+### Added
+- Unified segmented button selection color styling in settings
+
+### Fixed
+- Safely displayed resolved Codex environment details on init
+- Corrected macOS app update download URL resolution from GitHub Releases assets
+
+## [1.44.0] - 2026-03-19
+
+### Added
+- Simplified Chinese (简体中文) language support
+- Copy resume command from recent sessions for quick continuation
+- Surface primary session settings (model, permission mode) in session view
+- Codex approval amendment details display
+- Codex sub-agent session metadata display
+- Dedicated API key required error card with clear guidance
+- Codex as the default entry point
+- "More" button positioned inline at bottom-right with gradient fade
+
+### Changed
+- Reverted Flutter to 3.41.4 (Shorebird compatibility)
+- Softened scroll-to-bottom button appearance
+- Improved worktree section layout in new session sheet
+- Removed prefixIcon from model dropdowns in new session sheet
+- Removed copy button from API key required card
+- Hidden terminal integration behind feature flag
+
+### Fixed
+- Chat scroll adjustment when keyboard appears
+- Unseen session buffering stabilization
+- Restart drafts preserved across session switch
+- MCP images restored in Codex session history
+- Codex app-server approval protocol alignment
+
+## [1.43.0] - 2026-03-19
+
+### Added
+- Expandable summary text for long approval commands — tap "more"/"less" to toggle full command display
+- gpt-5.4-mini model option for Codex sessions
+
+### Fixed
+- Unified tool approval button order and color semantics across Claude/Codex
+- Reduced unnecessary rebuilds triggered by Android notification shade
+- Prevented false auth error on long assistant messages
+- Renamed "Experimental" label to "Preview" for App Store review safety
+
+## [1.42.0] - 2026-03-18
+
+### Added
+- Graceful degradation for unsupported Bridge messages (older Bridge versions show update hint instead of errors)
+
+### Changed
+- Simplified auth error troubleshooting — clearer guidance with `claude` / `/login` instead of raw CLI commands
+- Reframed remote login troubleshooting documentation
+- Updated store screenshots to light theme with iOS app icon
+- Updated feature graphic to light theme
+
+### Fixed
+- Store screenshots regenerated with correct bold font weight
+- Suppressed "Invalid message format" error from older Bridge versions
+
 ## [1.41.2] - 2026-03-17
 
 ### Fixed

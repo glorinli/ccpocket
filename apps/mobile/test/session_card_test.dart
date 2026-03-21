@@ -66,6 +66,47 @@ void main() {
       expect(info.codexSandboxMode, 'workspace-write');
       expect(info.codexModel, 'gpt-5.3-codex');
     });
+
+    test('parses agent metadata', () {
+      final json = {
+        'id': 'codex-agent',
+        'provider': 'codex',
+        'projectPath': '/home/user/my-app',
+        'status': 'running',
+        'createdAt': '',
+        'lastActivityAt': '',
+        'agentNickname': 'Atlas',
+        'agentRole': 'explorer',
+      };
+      final info = SessionInfo.fromJson(json);
+      expect(info.agentNickname, 'Atlas');
+      expect(info.agentRole, 'explorer');
+    });
+
+    test(
+      'keeps canonical codex execution mode when legacy permission differs',
+      () {
+        final json = {
+          'id': 'codex-canonical',
+          'provider': 'codex',
+          'projectPath': '/home/user/my-app',
+          'status': 'idle',
+          'createdAt': '',
+          'lastActivityAt': '',
+          'permissionMode': 'acceptEdits',
+          'executionMode': 'default',
+          'planMode': false,
+          'codexSettings': {
+            'approvalPolicy': 'on-request',
+            'sandboxMode': 'workspace-write',
+          },
+        };
+
+        final info = SessionInfo.fromJson(json);
+        expect(info.resolvedExecutionMode, ExecutionMode.defaultMode);
+        expect(info.resolvedPlanMode, isFalse);
+      },
+    );
   });
 
   group('RunningSessionCard', () {
@@ -197,10 +238,56 @@ void main() {
         _wrap(RunningSessionCard(session: session, onTap: () {})),
       );
 
-      expect(
-        find.text('gpt-5.3-codex  sandbox-workspace-write  on-request'),
-        findsOneWidget,
+      expect(find.text('gpt-5.3-codex Default'), findsOneWidget);
+      expect(find.text('Default'), findsOneWidget);
+      expect(find.text('Sandbox'), findsOneWidget);
+      expect(find.byIcon(Icons.tune), findsOneWidget);
+      expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
+    });
+
+    testWidgets('shows Planning label for running codex plan session', (
+      tester,
+    ) async {
+      final session = SessionInfo(
+        id: 'codex-planning',
+        provider: 'codex',
+        projectPath: '/home/user/my-app',
+        status: 'running',
+        planMode: true,
+        executionMode: ExecutionMode.defaultMode.value,
+        createdAt: DateTime.now().toIso8601String(),
+        lastActivityAt: DateTime.now().toIso8601String(),
+        codexModel: 'gpt-5.4',
       );
+
+      await tester.pumpWidget(
+        _wrap(RunningSessionCard(session: session, onTap: () {})),
+      );
+
+      expect(find.text('Planning'), findsOneWidget);
+      expect(find.text('gpt-5.4 Default'), findsOneWidget);
+    });
+
+    testWidgets('shows agent metadata for codex sub-agent sessions', (
+      tester,
+    ) async {
+      final session = SessionInfo(
+        id: 'codex-agent',
+        provider: 'codex',
+        projectPath: '/home/user/my-app',
+        status: 'running',
+        createdAt: DateTime.now().toIso8601String(),
+        lastActivityAt: DateTime.now().toIso8601String(),
+        agentNickname: 'Atlas',
+        agentRole: 'explorer',
+      );
+
+      await tester.pumpWidget(
+        _wrap(RunningSessionCard(session: session, onTap: () {})),
+      );
+
+      expect(find.text('Atlas [explorer]'), findsOneWidget);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
     });
 
     testWidgets('shows settings summary for claude provider with model', (
@@ -221,7 +308,10 @@ void main() {
         _wrap(RunningSessionCard(session: session, onTap: () {})),
       );
 
-      expect(find.text('claude-sonnet-4-20250514  plan'), findsOneWidget);
+      expect(
+        find.text('claude-sonnet-4-20250514  default  plan-on'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('shows bypass-all for claude bypassPermissions mode', (
@@ -241,7 +331,7 @@ void main() {
         _wrap(RunningSessionCard(session: session, onTap: () {})),
       );
 
-      expect(find.text('bypass-all'), findsOneWidget);
+      expect(find.text('full-access'), findsOneWidget);
     });
 
     testWidgets('shows only mode when claude model is null', (tester) async {
@@ -259,7 +349,7 @@ void main() {
         _wrap(RunningSessionCard(session: session, onTap: () {})),
       );
 
-      expect(find.text('plan'), findsOneWidget);
+      expect(find.text('default  plan-on'), findsOneWidget);
     });
 
     testWidgets('hides lastMessage row when empty', (tester) async {
@@ -579,8 +669,8 @@ void main() {
       );
 
       expect(find.text('Approve tool call'), findsOneWidget);
-      expect(find.text('Approve'), findsOneWidget);
-      expect(find.text('Always'), findsOneWidget);
+      expect(find.text('Allow Once'), findsOneWidget);
+      expect(find.text('Allow for This Session'), findsOneWidget);
       expect(find.text('Reject'), findsOneWidget);
       expect(find.text('Other answer...'), findsNothing);
 
@@ -617,10 +707,11 @@ void main() {
         _wrap(RecentSessionCard(session: session, onTap: () {})),
       );
 
-      expect(
-        find.text('gpt-5-codex  sandbox-danger-full-access  on-failure'),
-        findsOneWidget,
-      );
+      expect(find.text('gpt-5-codex Default'), findsOneWidget);
+      expect(find.byIcon(Icons.tune), findsOneWidget);
+      expect(find.text('Default'), findsOneWidget);
+      expect(find.text('Sandbox Off'), findsOneWidget);
+      expect(find.byIcon(Icons.warning_amber), findsOneWidget);
     });
 
     testWidgets('calls onLongPress callback', (tester) async {

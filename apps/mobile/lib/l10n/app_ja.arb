@@ -53,6 +53,9 @@
   "stopSessionConfirm": "このセッションを停止しますか？ Claude プロセスが終了します。",
 
   "startNewWithSameSettings": "同じ設定で新規開始",
+  "copyResumeCommand": "再開コマンドをコピー",
+  "copyResumeCommandSubtitle": "mac / Linuxに引き継ぎ",
+  "resumeCommandCopied": "再開コマンドをコピーしました",
   "editSettingsThenStart": "設定を変更して開始",
 
   "serverRequiresApiKey": "このサーバーには API キーが必要です",
@@ -128,6 +131,7 @@
   "projectPathHint": "/path/to/your/project",
   "permission": "パーミッション",
   "approval": "承認",
+  "restart": "再起動",
   "worktree": "Worktree",
   "advanced": "詳細設定",
   "modelOptional": "モデル（任意）",
@@ -155,7 +159,7 @@
     }
   },
   "branchOptional": "ブランチ（任意）",
-  "branchHint": "ccpocket/<auto>",
+  "branchHint": "feature/...",
   "noExistingWorktrees": "既存の worktree はありません",
 
   "planApprovalSummary": "上のプランを確認して、承認するか計画を続けてください",
@@ -172,6 +176,50 @@
   "reject": "拒否",
   "approve": "承認",
   "always": "常に許可",
+  "approveOnce": "今回だけ許可",
+  "approveForSession": "このセッション中は許可",
+  "permissionDefaultDescription": "標準の承認フローです",
+  "permissionAcceptEditsDescription": "ファイル編集を自動で承認します",
+  "permissionPlanDescription": "変更を実行する前に分析と計画を行います",
+  "permissionBypassDescription": "ほとんどの承認確認なしで実行します",
+  "executionDefaultDescription": "標準の承認フローです",
+  "executionAcceptEditsDescription": "ファイル編集を自動で承認します",
+  "executionFullAccessDescription": "ほとんどの承認確認なしで実行します",
+  "codexPlanModeDescription": "先にプランを作成し、承認後に実行を開始します",
+  "sandboxRestrictedDescription": "制限された環境でコマンドを実行します",
+  "sandboxNativeDescription": "ネイティブ環境でコマンドを実行します",
+  "sandboxNativeCautionDescription": "ネイティブ環境でコマンドを実行します（注意）",
+  "changePermissionModeTitle": "Permission Mode を変更",
+  "changePermissionModeBody": "{mode} に切り替えるとセッションが再起動します。会話は保持されます。",
+  "@changePermissionModeBody": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
+  "changeExecutionModeTitle": "Execution Mode を変更",
+  "changeExecutionModeBody": "{mode} に切り替えるとセッションが再起動します。会話は保持されます。",
+  "@changeExecutionModeBody": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
+  "enablePlanModeTitle": "Plan Mode を有効化",
+  "disablePlanModeTitle": "Plan Mode を無効化",
+  "enablePlanModeBody": "Plan Mode を有効化するとセッションが再起動します。会話は保持されます。",
+  "disablePlanModeBody": "Plan Mode を無効化するとセッションが再起動します。会話は保持されます。",
+  "changeSandboxModeTitle": "Sandbox Mode を変更",
+  "changeSandboxModeBody": "{mode} に切り替えるとセッションが再起動します。会話は保持されます。",
+  "@changeSandboxModeBody": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
 
   "messagePlaceholder": "Claude にメッセージ...",
   "filesMentioned": "{count} ファイルを @メンション中",
@@ -277,7 +325,7 @@
   "guideBridgeDescription": "PC で Bridge Server を起動しましょう。",
   "guideBridgePrerequisites": "必要なもの",
   "guideBridgePrereq1": "Node.js がインストールされた Mac / PC",
-  "guideBridgePrereq2": "Claude Code CLI または Codex CLI\n（使いたい方だけでOK）",
+  "guideBridgePrereq2": "Codex CLI または Claude Code CLI\n（使いたい方だけでOK）",
   "guideBridgeStep1": "npx で実行（推奨）",
   "guideBridgeStep1Command": "npx @ccpocket/bridge@latest",
   "guideBridgeStep2": "またはグローバルインストール",
@@ -533,9 +581,21 @@
   "showMore": "もっと見る",
   "showLess": "閉じる",
 
+  "authErrorTitle": "Claude Codeの再ログインが必要です",
+  "authErrorBody": "BridgeマシンでClaude Codeを起動し、再ログインしてください。",
+  "authErrorPrimaryCommandLabel": "手順1",
+  "authErrorSecondaryCommandLabel": "手順2",
+  "authErrorAlternativeLabel": "シェルから実行する場合",
+  "apiKeyRequiredTitle": "APIキーが必要です",
+  "apiKeyRequiredBody": "サブスクリプション認証は規約上の懸念から現在制限されています。APIキーをご利用ください。",
+  "apiKeyRequiredHint": "APIキーの取得:",
+
   "authHelpTitle": "認証トラブルシューティング",
-  "authHelpFetchError": "ヘルプガイドの取得に失敗しました",
-  "authHelpButton": "ヘルプ",
+  "authHelpFetchError": "トラブルシューティングガイドを読み込めませんでした",
+  "authHelpButton": "手順を見る",
+  "authHelpLanguageJa": "日本語",
+  "authHelpLanguageEn": "English",
+  "authHelpLanguageZhHans": "简体中文",
 
   "terminalApp": "ターミナルアプリ",
   "terminalAppSubtitle": "外部ターミナルアプリでプロジェクトを開く",
@@ -548,8 +608,8 @@
   "terminalSshUserHint": "未入力時はマシンの SSH ユーザーを使用",
   "openInTerminal": "ターミナルで開く",
   "terminalAppNotInstalled": "ターミナルアプリを開けませんでした",
-  "terminalAppExperimental": "実験的機能",
-  "terminalAppExperimentalNote": "この機能は実験的です。プリセットはアプリや環境によって動作しない場合があります。新しいプリセットの追加は GitHub で歓迎しています！",
+  "terminalAppExperimental": "プレビュー",
+  "terminalAppExperimentalNote": "この機能はプレビュー版です。プリセットはアプリや環境によって動作しない場合があります。新しいプリセットの追加は GitHub で歓迎しています！",
 
   "sectionSpread": "CC Pocket を広める",
   "shareApp": "SNSでシェア",

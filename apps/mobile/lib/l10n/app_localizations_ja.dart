@@ -143,6 +143,15 @@ class AppLocalizationsJa extends AppLocalizations {
   String get startNewWithSameSettings => '同じ設定で新規開始';
 
   @override
+  String get copyResumeCommand => '再開コマンドをコピー';
+
+  @override
+  String get copyResumeCommandSubtitle => 'mac / Linuxに引き継ぎ';
+
+  @override
+  String get resumeCommandCopied => '再開コマンドをコピーしました';
+
+  @override
   String get editSettingsThenStart => '設定を変更して開始';
 
   @override
@@ -283,6 +292,9 @@ class AppLocalizationsJa extends AppLocalizations {
   String get approval => '承認';
 
   @override
+  String get restart => '再起動';
+
+  @override
   String get worktree => 'Worktree';
 
   @override
@@ -351,7 +363,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get branchOptional => 'ブランチ（任意）';
 
   @override
-  String get branchHint => 'ccpocket/<auto>';
+  String get branchHint => 'feature/...';
 
   @override
   String get noExistingWorktrees => '既存の worktree はありません';
@@ -397,6 +409,81 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get always => '常に許可';
+
+  @override
+  String get approveOnce => '今回だけ許可';
+
+  @override
+  String get approveForSession => 'このセッション中は許可';
+
+  @override
+  String get permissionDefaultDescription => '標準の承認フローです';
+
+  @override
+  String get permissionAcceptEditsDescription => 'ファイル編集を自動で承認します';
+
+  @override
+  String get permissionPlanDescription => '変更を実行する前に分析と計画を行います';
+
+  @override
+  String get permissionBypassDescription => 'ほとんどの承認確認なしで実行します';
+
+  @override
+  String get executionDefaultDescription => '標準の承認フローです';
+
+  @override
+  String get executionAcceptEditsDescription => 'ファイル編集を自動で承認します';
+
+  @override
+  String get executionFullAccessDescription => 'ほとんどの承認確認なしで実行します';
+
+  @override
+  String get codexPlanModeDescription => '先にプランを作成し、承認後に実行を開始します';
+
+  @override
+  String get sandboxRestrictedDescription => '制限された環境でコマンドを実行します';
+
+  @override
+  String get sandboxNativeDescription => 'ネイティブ環境でコマンドを実行します';
+
+  @override
+  String get sandboxNativeCautionDescription => 'ネイティブ環境でコマンドを実行します（注意）';
+
+  @override
+  String get changePermissionModeTitle => 'Permission Mode を変更';
+
+  @override
+  String changePermissionModeBody(String mode) {
+    return '$mode に切り替えるとセッションが再起動します。会話は保持されます。';
+  }
+
+  @override
+  String get changeExecutionModeTitle => 'Execution Mode を変更';
+
+  @override
+  String changeExecutionModeBody(String mode) {
+    return '$mode に切り替えるとセッションが再起動します。会話は保持されます。';
+  }
+
+  @override
+  String get enablePlanModeTitle => 'Plan Mode を有効化';
+
+  @override
+  String get disablePlanModeTitle => 'Plan Mode を無効化';
+
+  @override
+  String get enablePlanModeBody => 'Plan Mode を有効化するとセッションが再起動します。会話は保持されます。';
+
+  @override
+  String get disablePlanModeBody => 'Plan Mode を無効化するとセッションが再起動します。会話は保持されます。';
+
+  @override
+  String get changeSandboxModeTitle => 'Sandbox Mode を変更';
+
+  @override
+  String changeSandboxModeBody(String mode) {
+    return '$mode に切り替えるとセッションが再起動します。会話は保持されます。';
+  }
 
   @override
   String get messagePlaceholder => 'Claude にメッセージ...';
@@ -593,7 +680,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get guideBridgePrereq2 =>
-      'Claude Code CLI または Codex CLI\n（使いたい方だけでOK）';
+      'Codex CLI または Claude Code CLI\n（使いたい方だけでOK）';
 
   @override
   String get guideBridgeStep1 => 'npx で実行（推奨）';
@@ -1149,13 +1236,47 @@ class AppLocalizationsJa extends AppLocalizations {
   String get showLess => '閉じる';
 
   @override
+  String get authErrorTitle => 'Claude Codeの再ログインが必要です';
+
+  @override
+  String get authErrorBody => 'BridgeマシンでClaude Codeを起動し、再ログインしてください。';
+
+  @override
+  String get authErrorPrimaryCommandLabel => '手順1';
+
+  @override
+  String get authErrorSecondaryCommandLabel => '手順2';
+
+  @override
+  String get authErrorAlternativeLabel => 'シェルから実行する場合';
+
+  @override
+  String get apiKeyRequiredTitle => 'APIキーが必要です';
+
+  @override
+  String get apiKeyRequiredBody =>
+      'サブスクリプション認証は規約上の懸念から現在制限されています。APIキーをご利用ください。';
+
+  @override
+  String get apiKeyRequiredHint => 'APIキーの取得:';
+
+  @override
   String get authHelpTitle => '認証トラブルシューティング';
 
   @override
-  String get authHelpFetchError => 'ヘルプガイドの取得に失敗しました';
+  String get authHelpFetchError => 'トラブルシューティングガイドを読み込めませんでした';
 
   @override
-  String get authHelpButton => 'ヘルプ';
+  String get authHelpButton => '手順を見る';
+
+  @override
+  String get authHelpLanguageJa => '日本語';
+
+  @override
+  String get authHelpLanguageEn => 'English';
+
+  @override
+  String get authHelpLanguageZhHans => '简体中文';
 
   @override
   String get terminalApp => 'ターミナルアプリ';
@@ -1191,11 +1312,11 @@ class AppLocalizationsJa extends AppLocalizations {
   String get terminalAppNotInstalled => 'ターミナルアプリを開けませんでした';
 
   @override
-  String get terminalAppExperimental => '実験的機能';
+  String get terminalAppExperimental => 'プレビュー';
 
   @override
   String get terminalAppExperimentalNote =>
-      'この機能は実験的です。プリセットはアプリや環境によって動作しない場合があります。新しいプリセットの追加は GitHub で歓迎しています！';
+      'この機能はプレビュー版です。プリセットはアプリや環境によって動作しない場合があります。新しいプリセットの追加は GitHub で歓迎しています！';
 
   @override
   String get sectionSpread => 'CC Pocket を広める';

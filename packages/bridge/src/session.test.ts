@@ -6,22 +6,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProcessStatus, ServerMessage } from "./parser.js";
 import { pathToSlug } from "./sessions-index.js";
 
-const { codexInstances, sdkInstances, fakeDirs, fakeFiles } = vi.hoisted(() => ({
-  codexInstances: [] as Array<{
-    start: ReturnType<typeof vi.fn>;
-    stop: ReturnType<typeof vi.fn>;
-    emit: (event: string, ...args: unknown[]) => boolean;
-  }>,
-  sdkInstances: [] as Array<{
-    permissionMode: string;
-    start: ReturnType<typeof vi.fn>;
-    stop: ReturnType<typeof vi.fn>;
-    rewindFiles: ReturnType<typeof vi.fn>;
-    emit: (event: string, ...args: unknown[]) => boolean;
-  }>,
-  fakeDirs: new Set<string>(),
-  fakeFiles: new Map<string, string>(),
-}));
+const { codexInstances, sdkInstances, fakeDirs, fakeFiles } = vi.hoisted(
+  () => ({
+    codexInstances: [] as Array<{
+      start: ReturnType<typeof vi.fn>;
+      stop: ReturnType<typeof vi.fn>;
+      emit: (event: string, ...args: unknown[]) => boolean;
+    }>,
+    sdkInstances: [] as Array<{
+      permissionMode: string;
+      start: ReturnType<typeof vi.fn>;
+      stop: ReturnType<typeof vi.fn>;
+      rewindFiles: ReturnType<typeof vi.fn>;
+      emit: (event: string, ...args: unknown[]) => boolean;
+    }>,
+    fakeDirs: new Set<string>(),
+    fakeFiles: new Map<string, string>(),
+  }),
+);
 
 vi.mock("node:fs", () => {
   const normalize = (value: unknown): string => String(value);
@@ -34,32 +36,36 @@ vi.mock("node:fs", () => {
       const key = normalize(path);
       const content = fakeFiles.get(key);
       if (content == null) {
-        const err = new Error(`ENOENT: no such file or directory, open '${key}'`);
+        const err = new Error(
+          `ENOENT: no such file or directory, open '${key}'`,
+        );
         (err as NodeJS.ErrnoException).code = "ENOENT";
         throw err;
       }
       return content;
     }),
-    readdirSync: vi.fn((path: unknown, options?: { withFileTypes?: boolean }) => {
-      const base = normalize(path);
-      const prefix = base.endsWith("/") ? base : `${base}/`;
-      const childNames = new Set<string>();
+    readdirSync: vi.fn(
+      (path: unknown, options?: { withFileTypes?: boolean }) => {
+        const base = normalize(path);
+        const prefix = base.endsWith("/") ? base : `${base}/`;
+        const childNames = new Set<string>();
 
-      for (const dir of fakeDirs) {
-        if (!dir.startsWith(prefix)) continue;
-        const rest = dir.slice(prefix.length);
-        if (!rest || rest.includes("/")) continue;
-        childNames.add(rest);
-      }
+        for (const dir of fakeDirs) {
+          if (!dir.startsWith(prefix)) continue;
+          const rest = dir.slice(prefix.length);
+          if (!rest || rest.includes("/")) continue;
+          childNames.add(rest);
+        }
 
-      if (options?.withFileTypes) {
-        return [...childNames].map((name) => ({
-          name,
-          isDirectory: () => true,
-        }));
-      }
-      return [...childNames];
-    }),
+        if (options?.withFileTypes) {
+          return [...childNames].map((name) => ({
+            name,
+            isDirectory: () => true,
+          }));
+        }
+        return [...childNames];
+      },
+    ),
   };
 });
 
@@ -136,13 +142,91 @@ describe("SessionManager codex path", () => {
     expect(session?.provider).toBe("codex");
   });
 
+  it("updates codex session settings from runtime init metadata", () => {
+    const manager = new SessionManager(() => {});
+    const sessionId = manager.create(
+      "/tmp/project-codex",
+      undefined,
+      undefined,
+      undefined,
+      "codex",
+      {
+        sandboxMode: "workspace-write",
+      },
+    );
+
+    codexInstances[0].emit("message", {
+      type: "system",
+      subtype: "init",
+      provider: "codex",
+      sessionId: "thread-runtime",
+      model: "gpt-5.4",
+      approvalPolicy: "never",
+      sandboxMode: "workspace-write",
+      networkAccessEnabled: false,
+    });
+    codexInstances[0].emit("message", {
+      type: "assistant",
+      message: {
+        id: "msg_1",
+        role: "assistant",
+        model: "gpt-5.4",
+        content: [],
+      },
+    });
+
+    const session = manager.get(sessionId);
+    expect(session?.claudeSessionId).toBe("thread-runtime");
+    expect(session?.codexSettings).toMatchObject({
+      model: "gpt-5.4",
+      approvalPolicy: "never",
+      sandboxMode: "workspace-write",
+      networkAccessEnabled: false,
+    });
+  });
+
+  it("ignores placeholder codex model names from runtime messages", () => {
+    const manager = new SessionManager(() => {});
+    const sessionId = manager.create(
+      "/tmp/project-codex",
+      undefined,
+      undefined,
+      undefined,
+      "codex",
+    );
+
+    codexInstances[0].emit("message", {
+      type: "system",
+      subtype: "init",
+      provider: "codex",
+      sessionId: "thread-runtime",
+      model: "codex",
+      sandboxMode: "workspace-write",
+    });
+    codexInstances[0].emit("message", {
+      type: "assistant",
+      message: {
+        id: "msg_1",
+        role: "assistant",
+        model: "codex",
+        content: [],
+      },
+    });
+
+    const session = manager.get(sessionId);
+    expect(session?.codexSettings?.model).toBeUndefined();
+  });
+
   it("uses existing worktree path as cwd for codex resume sessions", () => {
     const manager = new SessionManager(() => {});
     const sessionId = manager.create(
       "/tmp/project-main",
       undefined,
       [
-        { role: "user", content: [{ type: "text", text: "resume from worktree" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "resume from worktree" }],
+        },
       ],
       {
         existingWorktreePath: "/tmp/project-main-worktrees/feature-x",
@@ -222,7 +306,31 @@ describe("SessionManager codex path", () => {
     proc.emit("exit", 0);
     const afterExit = manager.get(sessionId);
     expect(afterExit?.status).toBe("idle");
-    expect(afterExit?.history.at(-1)).toEqual({ type: "status", status: "idle" });
+    expect(afterExit?.history.at(-1)).toEqual({
+      type: "status",
+      status: "idle",
+    });
+  });
+
+  it("includes codex agent metadata in session summaries", () => {
+    const manager = new SessionManager(() => {});
+    const sessionId = manager.create(
+      "/tmp/project-codex",
+      undefined,
+      undefined,
+      undefined,
+      "codex",
+    );
+    const proc = codexInstances[0] as (typeof codexInstances)[number] & {
+      agentNickname?: string;
+      agentRole?: string;
+    };
+    proc.agentNickname = "Atlas";
+    proc.agentRole = "explorer";
+
+    const summary = manager.list().find((entry) => entry.id == sessionId);
+    expect(summary?.agentNickname).toBe("Atlas");
+    expect(summary?.agentRole).toBe("explorer");
   });
 
   it("counts past messages and excludes streaming deltas from history", () => {
@@ -243,7 +351,10 @@ describe("SessionManager codex path", () => {
     );
 
     const proc = codexInstances[0];
-    proc.emit("message", { type: "stream_delta", text: "partial" } satisfies ServerMessage);
+    proc.emit("message", {
+      type: "stream_delta",
+      text: "partial",
+    } satisfies ServerMessage);
     proc.emit("message", {
       type: "assistant",
       message: {
@@ -261,6 +372,76 @@ describe("SessionManager codex path", () => {
 
     const summary = manager.list().find((s) => s.id === sessionId);
     expect(summary).toBeDefined();
+  });
+
+  it("extracts Codex MCP base64 images into images for history and forwarding", async () => {
+    const forwarded: Array<{ sessionId: string; msg: ServerMessage }> = [];
+    const imageStore = {
+      extractImagePaths: vi.fn(() => []),
+      registerImages: vi.fn(async () => []),
+      registerFromBase64: vi.fn(() => ({
+        id: "img-codex-1",
+        url: "/images/img-codex-1",
+        mimeType: "image/png",
+      })),
+    };
+    const manager = new SessionManager((sessionId, msg) => {
+      forwarded.push({ sessionId, msg });
+    }, imageStore as any);
+
+    const sessionId = manager.create(
+      "/tmp/project-codex-images",
+      undefined,
+      undefined,
+      undefined,
+      "codex",
+    );
+
+    codexInstances[0].emit("message", {
+      type: "tool_result",
+      toolUseId: "mcp-img-1",
+      toolName: "mcp:marionette/take_screenshots",
+      content: "Generated 1 image",
+      rawContentBlocks: [
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            data: "aGVsbG8=",
+            media_type: "image/png",
+          },
+        },
+      ],
+    } as ServerMessage);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const forwardedMsg = forwarded.at(-1)?.msg as
+      | Record<string, unknown>
+      | undefined;
+    expect(forwardedMsg).toBeDefined();
+    expect(forwardedMsg?.type).toBe("tool_result");
+    expect(forwardedMsg?.images).toEqual([
+      {
+        id: "img-codex-1",
+        url: "/images/img-codex-1",
+        mimeType: "image/png",
+      },
+    ]);
+    expect(forwardedMsg).not.toHaveProperty("rawContentBlocks");
+
+    const historyMsg = manager.get(sessionId)?.history.at(-1) as
+      | Record<string, unknown>
+      | undefined;
+    expect(historyMsg).toBeDefined();
+    expect(historyMsg?.images).toEqual([
+      {
+        id: "img-codex-1",
+        url: "/images/img-codex-1",
+        mimeType: "image/png",
+      },
+    ]);
+    expect(historyMsg).not.toHaveProperty("rawContentBlocks");
   });
 });
 
@@ -290,19 +471,15 @@ describe("SessionManager claude UUID backfill", () => {
     const worktreePath = `/tmp/ccpocket-main-${testId}-worktrees/feat`;
     const threadId = `thread-${testId}`;
 
-    registerHistoryJsonl(
-      worktreePath,
-      threadId,
-      [
-        JSON.stringify({
-          type: "user",
-          uuid: "user-uuid-1",
-          message: {
-            content: [{ type: "text", text: "hello from worktree" }],
-          },
-        }),
-      ],
-    );
+    registerHistoryJsonl(worktreePath, threadId, [
+      JSON.stringify({
+        type: "user",
+        uuid: "user-uuid-1",
+        message: {
+          content: [{ type: "text", text: "hello from worktree" }],
+        },
+      }),
+    ]);
 
     const forwarded: ServerMessage[] = [];
     const manager = new SessionManager((_, msg) => {
@@ -321,24 +498,30 @@ describe("SessionManager claude UUID backfill", () => {
     if (!session) return;
 
     session.claudeSessionId = threadId;
-    session.history.push({ type: "user_input", text: "hello from worktree" } as ServerMessage);
+    session.history.push({
+      type: "user_input",
+      text: "hello from worktree",
+    } as ServerMessage);
 
-    sdkInstances[0].emit(
-      "message",
-      {
-        type: "result",
-        subtype: "success",
-        sessionId: threadId,
-      } satisfies ServerMessage,
-    );
+    sdkInstances[0].emit("message", {
+      type: "result",
+      subtype: "success",
+      sessionId: threadId,
+    } satisfies ServerMessage);
 
     const userInput = session.history.find((msg) => msg.type === "user_input");
     expect(userInput).toBeDefined();
-    expect(userInput && "userMessageUuid" in userInput ? userInput.userMessageUuid : undefined)
-      .toBe("user-uuid-1");
+    expect(
+      userInput && "userMessageUuid" in userInput
+        ? userInput.userMessageUuid
+        : undefined,
+    ).toBe("user-uuid-1");
     expect(
       forwarded.some(
-        (msg) => msg.type === "user_input" && "userMessageUuid" in msg && msg.userMessageUuid === "user-uuid-1",
+        (msg) =>
+          msg.type === "user_input" &&
+          "userMessageUuid" in msg &&
+          msg.userMessageUuid === "user-uuid-1",
       ),
     ).toBe(true);
   });
@@ -413,19 +596,15 @@ describe("SessionManager claude UUID backfill", () => {
     const unrelatedPath = `/tmp/ccpocket-other-${testId}`;
     const threadId = `thread-${testId}`;
 
-    registerHistoryJsonl(
-      unrelatedPath,
-      threadId,
-      [
-        JSON.stringify({
-          type: "user",
-          uuid: "user-uuid-fallback",
-          message: {
-            content: [{ type: "text", text: "fallback match" }],
-          },
-        }),
-      ],
-    );
+    registerHistoryJsonl(unrelatedPath, threadId, [
+      JSON.stringify({
+        type: "user",
+        uuid: "user-uuid-fallback",
+        message: {
+          content: [{ type: "text", text: "fallback match" }],
+        },
+      }),
+    ]);
 
     const manager = new SessionManager(() => {});
     const sessionId = manager.create(projectPath);
@@ -434,20 +613,23 @@ describe("SessionManager claude UUID backfill", () => {
     if (!session) return;
 
     session.claudeSessionId = threadId;
-    session.history.push({ type: "user_input", text: "fallback match" } as ServerMessage);
+    session.history.push({
+      type: "user_input",
+      text: "fallback match",
+    } as ServerMessage);
 
-    sdkInstances[0].emit(
-      "message",
-      {
-        type: "result",
-        subtype: "success",
-        sessionId: threadId,
-      } satisfies ServerMessage,
-    );
+    sdkInstances[0].emit("message", {
+      type: "result",
+      subtype: "success",
+      sessionId: threadId,
+    } satisfies ServerMessage);
 
     const userInput = session.history.find((msg) => msg.type === "user_input");
     expect(userInput).toBeDefined();
-    expect(userInput && "userMessageUuid" in userInput ? userInput.userMessageUuid : undefined)
-      .toBe("user-uuid-fallback");
+    expect(
+      userInput && "userMessageUuid" in userInput
+        ? userInput.userMessageUuid
+        : undefined,
+    ).toBe("user-uuid-fallback");
   });
 });

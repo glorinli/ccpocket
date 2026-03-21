@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../l10n/app_localizations.dart';
 import '../models/messages.dart';
 import '../theme/app_theme.dart';
+import 'expandable_summary_text.dart';
 
 enum PlanApprovalUiMode { claude, codex }
 
@@ -46,6 +47,9 @@ class ApprovalBar extends StatelessWidget {
     final toolName = isPlanApproval
         ? l.planApproval
         : pendingPermission?.displayToolName;
+    final detailLines = isPlanApproval
+        ? const <String>[]
+        : (pendingPermission?.detailLines ?? const <String>[]);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -73,6 +77,7 @@ class ApprovalBar extends StatelessWidget {
               isPlanApproval: isPlanApproval,
               toolName: toolName,
               summary: summary,
+              detailLines: detailLines,
               onViewPlan: onViewPlan,
             ),
             const SizedBox(height: 6),
@@ -107,6 +112,7 @@ class _ApprovalHeader extends StatelessWidget {
   final bool isPlanApproval;
   final String? toolName;
   final String summary;
+  final List<String> detailLines;
   final VoidCallback? onViewPlan;
 
   const _ApprovalHeader({
@@ -114,6 +120,7 @@ class _ApprovalHeader extends StatelessWidget {
     required this.isPlanApproval,
     required this.toolName,
     required this.summary,
+    required this.detailLines,
     this.onViewPlan,
   });
 
@@ -149,12 +156,29 @@ class _ApprovalHeader extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              Text(
-                summary,
+              ExpandableSummaryText(
+                text: summary,
                 style: TextStyle(fontSize: 11, color: appColors.subtleText),
-                maxLines: isPlanApproval ? 2 : 1,
-                overflow: TextOverflow.ellipsis,
+                maxLines: 2,
+                backgroundColor: appColors.approvalBar,
               ),
+              if (detailLines.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                ...detailLines.map(
+                  (line) => Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: Text(
+                      line,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: appColors.subtleText,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -338,6 +362,7 @@ class _ApprovalButtons extends StatelessWidget {
       );
     }
 
+    final cs = Theme.of(context).colorScheme;
     return Row(
       children: [
         Expanded(
@@ -352,24 +377,29 @@ class _ApprovalButtons extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         Expanded(
+          child: OutlinedButton(
+            key: const ValueKey('approve_always_button'),
+            onPressed: onApproveAlways,
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              foregroundColor: cs.error,
+              side: BorderSide(color: cs.error.withValues(alpha: 0.5)),
+            ),
+            child: Text(
+              l.approveForSession,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
           child: FilledButton(
             key: const ValueKey('approve_button'),
             onPressed: onApprove,
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 10),
             ),
-            child: Text(l.approve, style: const TextStyle(fontSize: 13)),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: FilledButton.tonal(
-            key: const ValueKey('approve_always_button'),
-            onPressed: onApproveAlways,
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-            ),
-            child: Text(l.always, style: const TextStyle(fontSize: 13)),
+            child: Text(l.approveOnce, style: const TextStyle(fontSize: 13)),
           ),
         ),
       ],

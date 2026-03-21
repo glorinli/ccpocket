@@ -169,13 +169,14 @@ void main() {
 
       final worktreeChip = find.text('Worktree');
       expect(worktreeChip, findsOneWidget);
+      await tester.ensureVisible(worktreeChip);
 
       expect(
         find.byKey(const ValueKey('dialog_worktree_branch')),
         findsNothing,
       );
 
-      await tester.tap(worktreeChip);
+      await tester.tap(worktreeChip, warnIfMissed: false);
       await tester.pumpAndSettle();
 
       expect(
@@ -206,14 +207,17 @@ void main() {
       await tester.tap(find.text('Open'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Worktree'));
+      final worktreeChip = find.text('Worktree');
+      await tester.ensureVisible(worktreeChip);
+      await tester.tap(worktreeChip, warnIfMissed: false);
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('dialog_worktree_branch')),
         findsOneWidget,
       );
 
-      await tester.tap(find.text('Worktree'));
+      await tester.ensureVisible(worktreeChip);
+      await tester.tap(worktreeChip, warnIfMissed: false);
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('dialog_worktree_branch')),
@@ -252,7 +256,9 @@ void main() {
       await tester.tap(find.text('proj'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Worktree'));
+      final worktreeChip = find.text('Worktree');
+      await tester.ensureVisible(worktreeChip);
+      await tester.tap(worktreeChip, warnIfMissed: false);
       await tester.pumpAndSettle();
 
       await tester.enterText(
@@ -336,12 +342,53 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Worktree'), findsOneWidget);
-      await tester.tap(find.text('Worktree'));
+      final worktreeChip = find.text('Worktree');
+      await tester.ensureVisible(worktreeChip);
+      await tester.tap(worktreeChip, warnIfMissed: false);
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('dialog_worktree_branch')),
         findsOneWidget,
       );
+    });
+
+    testWidgets('defaults to Codex on open', (tester) async {
+      NewSessionParams? result;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('en'),
+          theme: AppTheme.darkTheme,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () async {
+                  result = await showNewSessionSheet(
+                    context: context,
+                    recentProjects: [(path: '/test/proj', name: 'proj')],
+                  );
+                },
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('proj'));
+      await tester.pumpAndSettle();
+
+      final startButton = find.byKey(const ValueKey('dialog_start_button'));
+      await tester.ensureVisible(startButton);
+      await tester.tap(startButton);
+      await tester.pumpAndSettle();
+
+      expect(result, isNotNull);
+      expect(result!.provider, Provider.codex);
     });
 
     testWidgets('initialParams are applied to the sheet', (tester) async {
@@ -360,7 +407,7 @@ void main() {
                   result = await showNewSessionSheet(
                     context: context,
                     recentProjects: [(path: '/test/proj', name: 'proj')],
-                    initialParams: const NewSessionParams(
+                    initialParams: NewSessionParams(
                       projectPath: '/test/proj',
                       provider: Provider.codex,
                       permissionMode: PermissionMode.acceptEdits,
@@ -398,5 +445,81 @@ void main() {
       expect(result!.useWorktree, isTrue);
       expect(result!.worktreeBranch, 'feature/default');
     });
+
+    testWidgets(
+      'primary model controls stay visible without opening advanced',
+      (tester) async {
+        await tester.pumpWidget(
+          _wrap(
+            Builder(
+              builder: (context) => Column(
+                children: [
+                  ElevatedButton(
+                    onPressed: () {
+                      showNewSessionSheet(
+                        context: context,
+                        recentProjects: [(path: '/test/proj', name: 'proj')],
+                      );
+                    },
+                    child: const Text('Open Codex'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () {
+                      showNewSessionSheet(
+                        context: context,
+                        recentProjects: [(path: '/test/proj', name: 'proj')],
+                        initialParams: NewSessionParams(
+                          projectPath: '/test/proj',
+                          provider: Provider.claude,
+                          permissionMode: PermissionMode.acceptEdits,
+                        ),
+                      );
+                    },
+                    child: const Text('Open Claude'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open Codex'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('dialog_codex_model')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('dialog_codex_reasoning_effort')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('dialog_advanced_codex')),
+          findsOneWidget,
+        );
+
+        Navigator.of(
+          tester.element(find.byKey(const ValueKey('dialog_codex_model'))),
+        ).pop();
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Open Claude'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('dialog_claude_model')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('dialog_claude_effort')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('dialog_advanced_claude')),
+          findsOneWidget,
+        );
+      },
+    );
   });
 }

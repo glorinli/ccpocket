@@ -55,6 +55,9 @@
   "stopSessionConfirm": "Stop this session? The Claude process will be terminated.",
 
   "startNewWithSameSettings": "Start New with Same Settings",
+  "copyResumeCommand": "Copy Resume Command",
+  "copyResumeCommandSubtitle": "Hand off to macOS / Linux",
+  "resumeCommandCopied": "Resume command copied",
   "editSettingsThenStart": "Edit Settings Then Start",
 
   "serverRequiresApiKey": "This server requires an API key",
@@ -105,6 +108,7 @@
   "projectPathHint": "/path/to/your/project",
   "permission": "Permission",
   "approval": "Approval",
+  "restart": "Restart",
   "worktree": "Worktree",
   "advanced": "Advanced",
   "modelOptional": "Model (optional)",
@@ -127,7 +131,7 @@
   "worktreeNew": "New",
   "worktreeExisting": "Existing ({count})",
   "branchOptional": "Branch (optional)",
-  "branchHint": "ccpocket/<auto>",
+  "branchHint": "feature/...",
   "noExistingWorktrees": "No existing worktrees",
 
   "planApprovalSummary": "Review the plan above and approve or continue planning",
@@ -144,6 +148,50 @@
   "reject": "Reject",
   "approve": "Approve",
   "always": "Always",
+  "approveOnce": "Allow Once",
+  "approveForSession": "Allow for This Session",
+  "permissionDefaultDescription": "Standard permission prompts",
+  "permissionAcceptEditsDescription": "Auto-approve file edits",
+  "permissionPlanDescription": "Analyze and plan before executing changes",
+  "permissionBypassDescription": "Run without most approval prompts",
+  "executionDefaultDescription": "Standard permission prompts",
+  "executionAcceptEditsDescription": "Auto-approve file edits",
+  "executionFullAccessDescription": "Run without most approval prompts",
+  "codexPlanModeDescription": "Draft a plan first, then wait for approval before executing",
+  "sandboxRestrictedDescription": "Run commands in restricted environment",
+  "sandboxNativeDescription": "Run commands natively",
+  "sandboxNativeCautionDescription": "Run commands natively (CAUTION)",
+  "changePermissionModeTitle": "Change Permission Mode",
+  "changePermissionModeBody": "Switching to {mode} will restart the session. Your conversation will be preserved.",
+  "@changePermissionModeBody": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
+  "changeExecutionModeTitle": "Change Execution Mode",
+  "changeExecutionModeBody": "Switching to {mode} will restart the session. Your conversation will be preserved.",
+  "@changeExecutionModeBody": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
+  "enablePlanModeTitle": "Enable Plan Mode",
+  "disablePlanModeTitle": "Disable Plan Mode",
+  "enablePlanModeBody": "Enabling Plan Mode will restart the session. Your conversation will be preserved.",
+  "disablePlanModeBody": "Disabling Plan Mode will restart the session. Your conversation will be preserved.",
+  "changeSandboxModeTitle": "Change Sandbox Mode",
+  "changeSandboxModeBody": "Switching to {mode} will restart the session. Your conversation will be preserved.",
+  "@changeSandboxModeBody": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
 
   "messagePlaceholder": "Message Claude...",
   "filesMentioned": "{count} file(s) @mentioned",
@@ -212,7 +260,7 @@
   "guideBridgeDescription": "Let's start the Bridge Server on your PC.",
   "guideBridgePrerequisites": "Prerequisites",
   "guideBridgePrereq1": "Mac / PC with Node.js installed",
-  "guideBridgePrereq2": "Claude Code CLI or Codex CLI\n(either one is fine)",
+  "guideBridgePrereq2": "Codex CLI or Claude Code CLI\n(either one is fine)",
   "guideBridgeStep1": "Run with npx (recommended)",
   "guideBridgeStep1Command": "npx @ccpocket/bridge@latest",
   "guideBridgeStep2": "Or install globally",
@@ -458,9 +506,21 @@
   "showMore": "Show more",
   "showLess": "Show less",
 
+  "authErrorTitle": "Claude login required",
+  "authErrorBody": "Claude Code needs to sign in again on the Bridge machine.",
+  "authErrorPrimaryCommandLabel": "Step 1",
+  "authErrorSecondaryCommandLabel": "Step 2",
+  "authErrorAlternativeLabel": "Shell alternative",
+  "apiKeyRequiredTitle": "API key required",
+  "apiKeyRequiredBody": "Subscription-based authentication is currently restricted due to Anthropic policy concerns. Please use an API key instead.",
+  "apiKeyRequiredHint": "Get your API key at:",
+
   "authHelpTitle": "Auth Troubleshooting",
-  "authHelpFetchError": "Failed to load help guide",
-  "authHelpButton": "Help",
+  "authHelpFetchError": "Failed to load the troubleshooting guide",
+  "authHelpButton": "View steps",
+  "authHelpLanguageJa": "日本語",
+  "authHelpLanguageEn": "English",
+  "authHelpLanguageZhHans": "Simplified Chinese",
 
   "terminalApp": "Terminal App",
   "terminalAppSubtitle": "Open projects in an external terminal app",
@@ -473,8 +533,8 @@
   "terminalSshUserHint": "Defaults to machine SSH user",
   "openInTerminal": "Open in Terminal",
   "terminalAppNotInstalled": "Could not open terminal app",
-  "terminalAppExperimental": "Experimental",
-  "terminalAppExperimentalNote": "This feature is experimental. Presets may not work with all apps or configurations. Contributions for new presets are welcome on GitHub!",
+  "terminalAppExperimental": "Preview",
+  "terminalAppExperimentalNote": "This feature is in preview. Presets may not work with all apps or configurations. Contributions for new presets are welcome on GitHub!",
 
   "sectionSpread": "ENJOYING CC POCKET?",
   "shareApp": "Share with Friends",

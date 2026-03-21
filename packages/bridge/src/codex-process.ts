@@ -45,11 +45,25 @@ export interface CodexSkillMetadata {
   brandColor?: string;
 }
 
+export interface CodexThreadSummary {
+  id: string;
+  preview: string;
+  createdAt: number;
+  updatedAt: number;
+  cwd: string;
+  agentNickname: string | null;
+  agentRole: string | null;
+  gitBranch: string | null;
+  name: string | null;
+}
+
 interface PendingApproval {
   requestId: string | number;
   toolUseId: string;
   toolName: string;
   input: Record<string, unknown>;
+  kind: "command" | "file" | "permissions";
+  requestedPermissions?: Record<string, unknown>;
 }
 
 interface PendingUserInputQuestion {
@@ -60,8 +74,10 @@ interface PendingUserInputQuestion {
 interface PendingUserInputRequest {
   requestId: string | number;
   toolUseId: string;
+  toolName: string;
   questions: PendingUserInputQuestion[];
   input: Record<string, unknown>;
+  kind: "questions" | "elicitation_form" | "elicitation_url";
 }
 
 interface PendingTurnCompletion {
@@ -95,10 +111,21 @@ interface JsonRpcEnvelope {
   };
 }
 
+interface CodexResolvedSettings {
+  model?: string;
+  approvalPolicy?: string;
+  sandboxMode?: string;
+  modelReasoningEffort?: string;
+  networkAccessEnabled?: boolean;
+  webSearchMode?: string;
+}
+
 export class CodexProcess extends EventEmitter<CodexProcessEvents> {
   private child: ChildProcessWithoutNullStreams | null = null;
   private _status: ProcessStatus = "starting";
   private _threadId: string | null = null;
+  private _agentNickname: string | null = null;
+  private _agentRole: string | null = null;
   private stopped = false;
   private startModel: string | undefined;
 
@@ -107,7 +134,11 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
   private pendingTurnCompletion: PendingTurnCompletion | null = null;
   private pendingApprovals = new Map<string, PendingApproval>();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
-  private lastTokenUsage: { input?: number; cachedInput?: number; output?: number } | null = null;
+  private lastTokenUsage: {
+    input?: number;
+    cachedInput?: number;
+    output?: number;
+  } | null = null;
 
   /** Full skill metadata from the last `skills/list` response. */
   private _skills: CodexSkillMetadata[] = [];
@@ -120,11 +151,14 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
   }
 
   private rpcSeq = 1;
-  private pendingRpc = new Map<number, {
-    resolve: (value: unknown) => void;
-    reject: (error: Error) => void;
-    method: string;
-  }>();
+  private pendingRpc = new Map<
+    number,
+    {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      method: string;
+    }
+  >();
 
   private stdoutBuffer = "";
 
@@ -147,8 +181,20 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     return this.inputResolve !== null;
   }
 
+  private getMessageModel(): string {
+    return sanitizeCodexModel(this.startModel) ?? "";
+  }
+
   get sessionId(): string | null {
     return this._threadId;
+  }
+
+  get agentNickname(): string | null {
+    return this._agentNickname;
+  }
+
+  get agentRole(): string | null {
+    return this._agentRole;
   }
 
   get isRunning(): boolean {
@@ -204,25 +250,101 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     await this.request("thread/archive", { threadId });
   }
 
+  async listThreads(
+    params: {
+      limit?: number;
+      cursor?: string | null;
+      cwd?: string;
+      searchTerm?: string;
+    } = {},
+  ): Promise<{ data: CodexThreadSummary[]; nextCursor: string | null }> {
+    const result = (await this.request("thread/list", {
+      sortKey: "updated_at",
+      archived: false,
+      ...(params.limit != null ? { limit: params.limit } : {}),
+      ...(params.cursor !== undefined ? { cursor: params.cursor } : {}),
+      ...(params.cwd ? { cwd: params.cwd } : {}),
+      ...(params.searchTerm ? { searchTerm: params.searchTerm } : {}),
+    })) as { data?: unknown[]; nextCursor?: unknown };
+
+    const data = Array.isArray(result.data)
+      ? result.data.map((entry) => toCodexThreadSummary(entry))
+      : [];
+    return {
+      data,
+      nextCursor:
+        typeof result.nextCursor === "string" ? result.nextCursor : null,
+    };
+  }
+
   start(projectPath: string, options?: CodexStartOptions): void {
     if (this.child) {
       this.stop();
     }
 
+    this.prepareLaunch(projectPath, options);
+    this.launchAppServer(projectPath, options);
+
+    void this.bootstrap(projectPath, options);
+  }
+
+  async initializeOnly(projectPath: string): Promise<void> {
+    if (this.child) {
+      this.stop();
+    }
+    this.prepareLaunch(projectPath);
+    this.launchAppServer(projectPath);
+    await this.initializeRpcConnection();
+    this.setStatus("idle");
+  }
+
+  stop(): void {
+    this.stopped = true;
+
+    if (this.inputResolve) {
+      this.inputResolve({ text: "" });
+      this.inputResolve = null;
+    }
+
+    this.pendingApprovals.clear();
+    this.pendingUserInputs.clear();
+    this.rejectAllPending(new Error("stopped"));
+
+    if (this.child) {
+      this.child.kill("SIGTERM");
+      this.child = null;
+    }
+
+    this.setStatus("idle");
+    console.log("[codex-process] Stopped");
+  }
+
+  private prepareLaunch(
+    projectPath: string,
+    options?: CodexStartOptions,
+  ): void {
     this.stopped = false;
     this._threadId = null;
+    this._agentNickname = null;
+    this._agentRole = null;
     this.pendingTurnId = null;
     this.pendingTurnCompletion = null;
     this.pendingApprovals.clear();
     this.pendingUserInputs.clear();
     this.lastTokenUsage = null;
-    this.startModel = options?.model;
+    this.startModel = sanitizeCodexModel(options?.model);
     this._approvalPolicy = options?.approvalPolicy ?? "never";
     this._collaborationMode = options?.collaborationMode ?? "default";
     this.lastPlanItemText = null;
     this.pendingPlanCompletion = null;
     this._pendingPlanInput = null;
+    this._projectPath = projectPath;
+  }
 
+  private launchAppServer(
+    projectPath: string,
+    options?: CodexStartOptions,
+  ): void {
     console.log(
       `[codex-process] Starting app-server (cwd: ${projectPath}, sandbox: ${options?.sandboxMode ?? "workspace-write"}, approval: ${options?.approvalPolicy ?? "never"}, model: ${options?.model ?? "default"}, collaboration: ${this._collaborationMode})`,
     );
@@ -250,7 +372,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     child.on("error", (err) => {
       if (this.stopped) return;
       console.error("[codex-process] app-server process error:", err);
-      this.emitMessage({ type: "error", message: `Failed to start codex app-server: ${err.message}` });
+      this.emitMessage({
+        type: "error",
+        message: `Failed to start codex app-server: ${err.message}`,
+      });
       this.setStatus("idle");
       this.emit("exit", 1);
     });
@@ -260,34 +385,14 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       this.child = null;
       this.rejectAllPending(new Error("codex app-server exited"));
       if (!this.stopped && exitCode !== 0) {
-        this.emitMessage({ type: "error", message: `codex app-server exited with code ${exitCode}` });
+        this.emitMessage({
+          type: "error",
+          message: `codex app-server exited with code ${exitCode}`,
+        });
       }
       this.setStatus("idle");
       this.emit("exit", code);
     });
-
-    void this.bootstrap(projectPath, options);
-  }
-
-  stop(): void {
-    this.stopped = true;
-
-    if (this.inputResolve) {
-      this.inputResolve({ text: "" });
-      this.inputResolve = null;
-    }
-
-    this.pendingApprovals.clear();
-    this.pendingUserInputs.clear();
-    this.rejectAllPending(new Error("stopped"));
-
-    if (this.child) {
-      this.child.kill("SIGTERM");
-      this.child = null;
-    }
-
-    this.setStatus("idle");
-    console.log("[codex-process] Stopped");
   }
 
   interrupt(): void {
@@ -298,7 +403,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       turnId: this.pendingTurnId,
     }).catch((err) => {
       if (!this.stopped) {
-        console.warn(`[codex-process] turn/interrupt failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `[codex-process] turn/interrupt failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     });
   }
@@ -313,9 +420,14 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     resolve({ text });
   }
 
-  sendInputWithImages(text: string, images: Array<{ base64: string; mimeType: string }>): void {
+  sendInputWithImages(
+    text: string,
+    images: Array<{ base64: string; mimeType: string }>,
+  ): void {
     if (!this.inputResolve) {
-      console.error("[codex-process] No pending input resolver for sendInputWithImages");
+      console.error(
+        "[codex-process] No pending input resolver for sendInputWithImages",
+      );
       return;
     }
     const resolve = this.inputResolve;
@@ -323,9 +435,14 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     resolve({ text, images });
   }
 
-  sendInputWithSkill(text: string, skill: { name: string; path: string }): void {
+  sendInputWithSkill(
+    text: string,
+    skill: { name: string; path: string },
+  ): void {
     if (!this.inputResolve) {
-      console.error("[codex-process] No pending input resolver for sendInputWithSkill");
+      console.error(
+        "[codex-process] No pending input resolver for sendInputWithSkill",
+      );
       return;
     }
     const resolve = this.inputResolve;
@@ -335,21 +452,27 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
 
   approve(toolUseId?: string, _updatedInput?: Record<string, unknown>): void {
     // Check if this is a plan completion approval
-    if (this.pendingPlanCompletion && toolUseId === this.pendingPlanCompletion.toolUseId) {
+    if (
+      this.pendingPlanCompletion &&
+      toolUseId === this.pendingPlanCompletion.toolUseId
+    ) {
       this.handlePlanApproved(_updatedInput);
       return;
     }
 
     const pending = this.resolvePendingApproval(toolUseId);
     if (!pending) {
-      console.log("[codex-process] approve() called but no pending permission requests");
+      console.log(
+        "[codex-process] approve() called but no pending permission requests",
+      );
       return;
     }
 
     this.pendingApprovals.delete(pending.toolUseId);
-    this.respondToServerRequest(pending.requestId, {
-      decision: "accept",
-    });
+    this.respondToServerRequest(
+      pending.requestId,
+      buildApprovalResponse(pending, "accept"),
+    );
     this.emitToolResult(pending.toolUseId, "Approved");
 
     if (this.pendingApprovals.size === 0) {
@@ -360,17 +483,17 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
   approveAlways(toolUseId?: string): void {
     const pending = this.resolvePendingApproval(toolUseId);
     if (!pending) {
-      console.log("[codex-process] approveAlways() called but no pending permission requests");
+      console.log(
+        "[codex-process] approveAlways() called but no pending permission requests",
+      );
       return;
     }
 
     this.pendingApprovals.delete(pending.toolUseId);
-    this.respondToServerRequest(pending.requestId, {
-      decision: "accept",
-      acceptSettings: {
-        forSession: true,
-      },
-    });
+    this.respondToServerRequest(
+      pending.requestId,
+      buildApprovalResponse(pending, "acceptForSession"),
+    );
     this.emitToolResult(pending.toolUseId, "Approved (always)");
 
     if (this.pendingApprovals.size === 0) {
@@ -380,21 +503,27 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
 
   reject(toolUseId?: string, _message?: string): void {
     // Check if this is a plan completion rejection
-    if (this.pendingPlanCompletion && toolUseId === this.pendingPlanCompletion.toolUseId) {
+    if (
+      this.pendingPlanCompletion &&
+      toolUseId === this.pendingPlanCompletion.toolUseId
+    ) {
       this.handlePlanRejected(_message);
       return;
     }
 
     const pending = this.resolvePendingApproval(toolUseId);
     if (!pending) {
-      console.log("[codex-process] reject() called but no pending permission requests");
+      console.log(
+        "[codex-process] reject() called but no pending permission requests",
+      );
       return;
     }
 
     this.pendingApprovals.delete(pending.toolUseId);
-    this.respondToServerRequest(pending.requestId, {
-      decision: "decline",
-    });
+    this.respondToServerRequest(
+      pending.requestId,
+      buildApprovalResponse(pending, "decline"),
+    );
     this.emitToolResult(pending.toolUseId, "Rejected");
 
     if (this.pendingApprovals.size === 0) {
@@ -405,14 +534,17 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
   answer(toolUseId: string, result: string): void {
     const pending = this.resolvePendingUserInput(toolUseId);
     if (!pending) {
-      console.log("[codex-process] answer() called but no pending AskUserQuestion");
+      console.log(
+        "[codex-process] answer() called but no pending AskUserQuestion",
+      );
       return;
     }
 
     this.pendingUserInputs.delete(pending.toolUseId);
-    this.respondToServerRequest(pending.requestId, {
-      answers: buildUserInputAnswers(pending.questions, result),
-    });
+    this.respondToServerRequest(
+      pending.requestId,
+      buildUserInputResponse(pending, result),
+    );
 
     this.emitToolResult(pending.toolUseId, "Answered");
 
@@ -423,7 +555,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
 
   getPendingPermission(
     toolUseId?: string,
-  ): { toolUseId: string; toolName: string; input: Record<string, unknown> } | undefined {
+  ):
+    | { toolUseId: string; toolName: string; input: Record<string, unknown> }
+    | undefined {
     // Check plan completion first
     if (this.pendingPlanCompletion) {
       if (!toolUseId || toolUseId === this.pendingPlanCompletion.toolUseId) {
@@ -462,13 +596,17 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     });
   }
 
-  private resolvePendingApproval(toolUseId?: string): PendingApproval | undefined {
+  private resolvePendingApproval(
+    toolUseId?: string,
+  ): PendingApproval | undefined {
     if (toolUseId) return this.pendingApprovals.get(toolUseId);
     const first = this.pendingApprovals.values().next();
     return first.done ? undefined : first.value;
   }
 
-  private resolvePendingUserInput(toolUseId?: string): PendingUserInputRequest | undefined {
+  private resolvePendingUserInput(
+    toolUseId?: string,
+  ): PendingUserInputRequest | undefined {
     if (toolUseId) return this.pendingUserInputs.get(toolUseId);
     const first = this.pendingUserInputs.values().next();
     return first.done ? undefined : first.value;
@@ -482,7 +620,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
    * Plan approved → switch to Default mode and auto-start execution.
    */
   private handlePlanApproved(updatedInput?: Record<string, unknown>): void {
-    const planText = (updatedInput?.plan as string) ?? this.pendingPlanCompletion?.planText ?? "";
+    const planText =
+      (updatedInput?.plan as string) ??
+      this.pendingPlanCompletion?.planText ??
+      "";
     const resolvedToolUseId = this.pendingPlanCompletion?.toolUseId;
     this.pendingPlanCompletion = null;
     this._collaborationMode = "default";
@@ -501,7 +642,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     } else {
       // inputResolve may not be ready yet if approval comes before the next
       // input loop iteration.  Queue the text so sendInput() can pick it up.
-      console.warn("[codex-process] Plan approved but inputResolve not ready, queuing as pending input");
+      console.warn(
+        "[codex-process] Plan approved but inputResolve not ready, queuing as pending input",
+      );
       this._pendingPlanInput = `Execute the following plan:\n\n${planText}`;
     }
   }
@@ -526,7 +669,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         this.inputResolve = null;
         resolve({ text: feedback });
       } else {
-        console.warn("[codex-process] Plan rejected but inputResolve not ready, queuing feedback");
+        console.warn(
+          "[codex-process] Plan rejected but inputResolve not ready, queuing feedback",
+        );
         this._pendingPlanInput = feedback;
       }
     } else {
@@ -534,28 +679,30 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     }
   }
 
-  private async bootstrap(projectPath: string, options?: CodexStartOptions): Promise<void> {
+  private async bootstrap(
+    projectPath: string,
+    options?: CodexStartOptions,
+  ): Promise<void> {
     try {
-      await this.request("initialize", {
-        clientInfo: {
-          name: "ccpocket_bridge",
-          version: "1.0.0",
-          title: "ccpocket bridge",
-        },
-        capabilities: {
-          experimentalApi: true,
-        },
-      });
-      this.notify("initialized", {});
+      await this.initializeRpcConnection();
 
       const threadParams: Record<string, unknown> = {
         cwd: projectPath,
-        approvalPolicy: normalizeApprovalPolicy(options?.approvalPolicy ?? "never"),
-        sandbox: normalizeSandboxMode(options?.sandboxMode ?? "workspace-write"),
+        approvalPolicy: normalizeApprovalPolicy(
+          options?.approvalPolicy ?? "never",
+        ),
+        sandbox: normalizeSandboxMode(
+          options?.sandboxMode ?? "workspace-write",
+        ),
+        experimentalRawEvents: false,
+        persistExtendedHistory: true,
       };
-      if (options?.model) threadParams.model = options.model;
+      const requestedModel = sanitizeCodexModel(options?.model);
+      if (requestedModel) threadParams.model = requestedModel;
       if (options?.modelReasoningEffort) {
-        threadParams.effort = normalizeReasoningEffort(options.modelReasoningEffort);
+        threadParams.effort = normalizeReasoningEffort(
+          options.modelReasoningEffort,
+        );
       }
       if (options?.networkAccessEnabled !== undefined) {
         threadParams.sandboxPolicy = {
@@ -570,13 +717,20 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       const method = options?.threadId ? "thread/resume" : "thread/start";
       if (options?.threadId) {
         threadParams.threadId = options.threadId;
+      } else {
+        threadParams.experimentalRawEvents = false;
+      }
+      if (options?.threadId) {
+        threadParams.persistExtendedHistory = true;
       }
 
-      const response = await this.request(method, threadParams) as Record<string, unknown>;
+      const response = (await this.request(method, threadParams)) as Record<
+        string,
+        unknown
+      >;
       const thread = response.thread as Record<string, unknown> | undefined;
-      const threadId = typeof thread?.id === "string"
-        ? thread.id
-        : options?.threadId;
+      const threadId =
+        typeof thread?.id === "string" ? thread.id : options?.threadId;
       if (!threadId) {
         throw new Error(`${method} returned no thread id`);
       }
@@ -585,13 +739,36 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       if (typeof thread?.model === "string" && thread.model) {
         this.startModel = thread.model;
       }
+      const resolvedSettings =
+        extractResolvedSettingsFromThreadResponse(response);
+      if (resolvedSettings.model) {
+        this.startModel = resolvedSettings.model;
+      }
 
       this._threadId = threadId;
       this.emitMessage({
         type: "system",
         subtype: "init",
         sessionId: threadId,
-        model: this.startModel ?? "codex",
+        provider: "codex",
+        ...(sanitizeCodexModel(this.startModel)
+          ? { model: sanitizeCodexModel(this.startModel) }
+          : {}),
+        ...(resolvedSettings.approvalPolicy
+          ? { approvalPolicy: resolvedSettings.approvalPolicy }
+          : {}),
+        ...(resolvedSettings.sandboxMode
+          ? { sandboxMode: resolvedSettings.sandboxMode }
+          : {}),
+        ...(resolvedSettings.modelReasoningEffort
+          ? { modelReasoningEffort: resolvedSettings.modelReasoningEffort }
+          : {}),
+        ...(resolvedSettings.networkAccessEnabled !== undefined
+          ? { networkAccessEnabled: resolvedSettings.networkAccessEnabled }
+          : {}),
+        ...(resolvedSettings.webSearchMode
+          ? { webSearchMode: resolvedSettings.webSearchMode }
+          : {}),
       });
       this.setStatus("idle");
 
@@ -605,11 +782,30 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         const message = err instanceof Error ? err.message : String(err);
         console.error("[codex-process] bootstrap error:", err);
         this.emitMessage({ type: "error", message: `Codex error: ${message}` });
-        this.emitMessage({ type: "result", subtype: "error", error: message, sessionId: this._threadId ?? undefined });
+        this.emitMessage({
+          type: "result",
+          subtype: "error",
+          error: message,
+          sessionId: this._threadId ?? undefined,
+        });
       }
       this.setStatus("idle");
       this.emit("exit", 1);
     }
+  }
+
+  private async initializeRpcConnection(): Promise<void> {
+    await this.request("initialize", {
+      clientInfo: {
+        name: "ccpocket_bridge",
+        version: "1.0.0",
+        title: "ccpocket bridge",
+      },
+      capabilities: {
+        experimentalApi: true,
+      },
+    });
+    this.notify("initialized", {});
   }
 
   /**
@@ -634,10 +830,12 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
           brandColor?: string | null;
         } | null;
       }
-      const result = await Promise.race([
+      const result = (await Promise.race([
         this.request("skills/list", { cwds: [projectPath] }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
-      ]) as { data?: Array<{ cwd: string; skills: SkillRaw[] }> } | null;
+        new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), TIMEOUT_MS),
+        ),
+      ])) as { data?: Array<{ cwd: string; skills: SkillRaw[] }> } | null;
 
       if (this.stopped || !result?.data) return;
 
@@ -653,7 +851,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
               name: skill.name,
               path: skill.path,
               description: skill.description,
-              shortDescription: skill.shortDescription ?? skill.interface?.shortDescription ?? undefined,
+              shortDescription:
+                skill.shortDescription ??
+                skill.interface?.shortDescription ??
+                undefined,
               enabled: skill.enabled,
               scope: skill.scope,
               displayName: skill.interface?.displayName ?? undefined,
@@ -665,7 +866,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       }
       this._skills = skillMetadata;
       if (slashCommands.length > 0) {
-        console.log(`[codex-process] skills/list returned ${slashCommands.length} skills`);
+        console.log(
+          `[codex-process] skills/list returned ${slashCommands.length} skills`,
+        );
         this.emitMessage({
           type: "system",
           subtype: "supported_commands",
@@ -675,7 +878,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         });
       }
     } catch (err) {
-      console.log(`[codex-process] skills/list failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      console.log(
+        `[codex-process] skills/list failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -693,7 +898,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       });
       if (this.stopped || !pendingInput.text) break;
       if (!this._threadId) {
-        this.emitMessage({ type: "error", message: "Codex thread is not initialized" });
+        this.emitMessage({
+          type: "error",
+          message: "Codex thread is not initialized",
+        });
         continue;
       }
 
@@ -715,15 +923,21 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
             this._approvalPolicy as CodexStartOptions["approvalPolicy"],
           ),
         };
-        if (options?.model) params.model = options.model;
+        const requestedModel = sanitizeCodexModel(options?.model);
+        if (requestedModel) params.model = requestedModel;
         if (options?.modelReasoningEffort) {
-          params.effort = normalizeReasoningEffort(options.modelReasoningEffort);
+          params.effort = normalizeReasoningEffort(
+            options.modelReasoningEffort,
+          );
         }
 
         // Always send collaborationMode so the server switches modes correctly.
         // Omitting it causes the server to persist the previous turn's mode.
         const modeSettings: Record<string, unknown> = {
-          model: options?.model || this.startModel || "gpt-5.4",
+          model:
+            requestedModel
+            || sanitizeCodexModel(this.startModel)
+            || "gpt-5.4",
         };
         if (this._collaborationMode === "plan") {
           modeSettings.reasoning_effort = "medium";
@@ -733,10 +947,14 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
           settings: modeSettings,
         };
 
-        console.log(`[codex-process] turn/start: approval=${params.approvalPolicy}, collaboration=${this._collaborationMode}`);
+        console.log(
+          `[codex-process] turn/start: approval=${params.approvalPolicy}, collaboration=${this._collaborationMode}`,
+        );
         void this.request("turn/start", params)
           .then((result) => {
-            const turn = (result as Record<string, unknown>).turn as Record<string, unknown> | undefined;
+            const turn = (result as Record<string, unknown>).turn as
+              | Record<string, unknown>
+              | undefined;
             if (typeof turn?.id === "string") {
               this.pendingTurnId = turn.id;
             }
@@ -759,7 +977,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         }
       });
 
-      await Promise.all(tempPaths.map((path) => rm(path, { force: true }).catch(() => {})));
+      await Promise.all(
+        tempPaths.map((path) => rm(path, { force: true }).catch(() => {})),
+      );
       void completion;
     }
   }
@@ -777,7 +997,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         const envelope = JSON.parse(line) as JsonRpcEnvelope;
         this.handleRpcEnvelope(envelope);
       } catch (err) {
-        console.warn(`[codex-process] failed to parse app-server JSON line: ${line.slice(0, 200)}`);
+        console.warn(
+          `[codex-process] failed to parse app-server JSON line: ${line.slice(0, 200)}`,
+        );
         if (!this.stopped) {
           this.emitMessage({
             type: "error",
@@ -789,12 +1011,24 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
   }
 
   private handleRpcEnvelope(envelope: JsonRpcEnvelope): void {
-    if (envelope.id != null && envelope.method && envelope.result === undefined && envelope.error === undefined) {
-      this.handleServerRequest(envelope.id, envelope.method, envelope.params ?? {});
+    if (
+      envelope.id != null &&
+      envelope.method &&
+      envelope.result === undefined &&
+      envelope.error === undefined
+    ) {
+      this.handleServerRequest(
+        envelope.id,
+        envelope.method,
+        envelope.params ?? {},
+      );
       return;
     }
 
-    if (envelope.id != null && (envelope.result !== undefined || envelope.error)) {
+    if (
+      envelope.id != null &&
+      (envelope.result !== undefined || envelope.error)
+    ) {
       this.handleRpcResponse(envelope as RpcSuccess | RpcError);
       return;
     }
@@ -813,7 +1047,8 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     this.pendingRpc.delete(envelope.id);
 
     if ("error" in envelope && envelope.error) {
-      const message = envelope.error.message ?? `RPC error ${envelope.error.code ?? ""}`;
+      const message =
+        envelope.error.message ?? `RPC error ${envelope.error.code ?? ""}`;
       pending.reject(new Error(message));
       return;
     }
@@ -821,16 +1056,48 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     pending.resolve((envelope as RpcSuccess).result);
   }
 
-  private handleServerRequest(id: number | string, method: string, params: Record<string, unknown>): void {
+  private handleServerRequest(
+    id: number | string,
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
     switch (method) {
       case "item/commandExecution/requestApproval": {
         const toolUseId = this.extractToolUseId(params, id);
         const input: Record<string, unknown> = {
-          ...(typeof params.command === "string" ? { command: params.command } : {}),
+          ...(typeof params.command === "string"
+            ? { command: params.command }
+            : {}),
           ...(typeof params.cwd === "string" ? { cwd: params.cwd } : {}),
-          ...(params.commandActions ? { commandActions: params.commandActions } : {}),
-          ...(params.networkApprovalContext ? { networkApprovalContext: params.networkApprovalContext } : {}),
-          ...(typeof params.reason === "string" ? { reason: params.reason } : {}),
+          ...(params.commandActions
+            ? { commandActions: params.commandActions }
+            : {}),
+          ...(params.networkApprovalContext
+            ? { networkApprovalContext: params.networkApprovalContext }
+            : {}),
+          ...(params.additionalPermissions
+            ? { additionalPermissions: params.additionalPermissions }
+            : {}),
+          ...(params.skillMetadata
+            ? { skillMetadata: params.skillMetadata }
+            : {}),
+          ...(params.proposedExecpolicyAmendment
+            ? {
+                proposedExecpolicyAmendment: params.proposedExecpolicyAmendment,
+              }
+            : {}),
+          ...(params.proposedNetworkPolicyAmendments
+            ? {
+                proposedNetworkPolicyAmendments:
+                  params.proposedNetworkPolicyAmendments,
+              }
+            : {}),
+          ...(params.availableDecisions
+            ? { availableDecisions: params.availableDecisions }
+            : {}),
+          ...(typeof params.reason === "string"
+            ? { reason: params.reason }
+            : {}),
         };
 
         this.pendingApprovals.set(toolUseId, {
@@ -838,6 +1105,7 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
           toolUseId,
           toolName: "Bash",
           input,
+          kind: "command",
         });
         this.emitMessage({
           type: "permission_request",
@@ -853,7 +1121,12 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         const toolUseId = this.extractToolUseId(params, id);
         const input: Record<string, unknown> = {
           ...(Array.isArray(params.changes) ? { changes: params.changes } : {}),
-          ...(typeof params.reason === "string" ? { reason: params.reason } : {}),
+          ...(typeof params.grantRoot === "string"
+            ? { grantRoot: params.grantRoot }
+            : {}),
+          ...(typeof params.reason === "string"
+            ? { reason: params.reason }
+            : {}),
         };
 
         this.pendingApprovals.set(toolUseId, {
@@ -861,6 +1134,7 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
           toolUseId,
           toolName: "FileChange",
           input,
+          kind: "file",
         });
         this.emitMessage({
           type: "permission_request",
@@ -890,11 +1164,13 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         this.pendingUserInputs.set(toolUseId, {
           requestId: id,
           toolUseId,
+          toolName: "AskUserQuestion",
           questions: questions.map((q) => ({
             id: q.id,
             question: q.question,
           })),
           input,
+          kind: "questions",
         });
         this.emitMessage({
           type: "permission_request",
@@ -906,19 +1182,73 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         break;
       }
 
+      case "item/permissions/requestApproval": {
+        const toolUseId = this.extractToolUseId(params, id);
+        const requestedPermissions = asRecord(params.permissions) ?? {};
+        const input: Record<string, unknown> = {
+          permissions: requestedPermissions,
+          ...(typeof params.reason === "string"
+            ? { reason: params.reason }
+            : {}),
+        };
+
+        this.pendingApprovals.set(toolUseId, {
+          requestId: id,
+          toolUseId,
+          toolName: "Permissions",
+          input,
+          kind: "permissions",
+          requestedPermissions,
+        });
+        this.emitMessage({
+          type: "permission_request",
+          toolUseId,
+          toolName: "Permissions",
+          input,
+        });
+        this.setStatus("waiting_approval");
+        break;
+      }
+
+      case "mcpServer/elicitation/request": {
+        const toolUseId = this.extractToolUseId(params, id);
+        const elicitation = createElicitationInput(params);
+        this.pendingUserInputs.set(toolUseId, {
+          requestId: id,
+          toolUseId,
+          toolName: "McpElicitation",
+          questions: elicitation.questions,
+          input: elicitation.input,
+          kind: elicitation.kind,
+        });
+        this.emitMessage({
+          type: "permission_request",
+          toolUseId,
+          toolName: "McpElicitation",
+          input: elicitation.input,
+        });
+        this.setStatus("waiting_approval");
+        break;
+      }
+
       default:
         this.respondToServerRequest(id, {});
         break;
     }
   }
 
-  private handleNotification(method: string, params: Record<string, unknown>): void {
+  private handleNotification(
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
     switch (method) {
       case "thread/started": {
         const thread = params.thread as Record<string, unknown> | undefined;
         if (typeof thread?.id === "string") {
           this._threadId = thread.id;
         }
+        this._agentNickname = stringOrNull(thread?.agentNickname);
+        this._agentRole = stringOrNull(thread?.agentRole);
         break;
       }
 
@@ -932,7 +1262,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       }
 
       case "turn/completed": {
-        this.handleTurnCompleted(params.turn as Record<string, unknown> | undefined);
+        this.handleTurnCompleted(
+          params.turn as Record<string, unknown> | undefined,
+        );
         break;
       }
 
@@ -946,29 +1278,38 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         if (usage) {
           this.lastTokenUsage = {
             input: numberOrUndefined(usage.inputTokens ?? usage.input_tokens),
-            cachedInput: numberOrUndefined(usage.cachedInputTokens ?? usage.cached_input_tokens),
-            output: numberOrUndefined(usage.outputTokens ?? usage.output_tokens),
+            cachedInput: numberOrUndefined(
+              usage.cachedInputTokens ?? usage.cached_input_tokens,
+            ),
+            output: numberOrUndefined(
+              usage.outputTokens ?? usage.output_tokens,
+            ),
           };
         }
         break;
       }
 
       case "item/started": {
-        this.processItemStarted(params.item as Record<string, unknown> | undefined);
+        this.processItemStarted(
+          params.item as Record<string, unknown> | undefined,
+        );
         break;
       }
 
       case "item/completed": {
-        this.processItemCompleted(params.item as Record<string, unknown> | undefined);
+        this.processItemCompleted(
+          params.item as Record<string, unknown> | undefined,
+        );
         break;
       }
 
       case "item/agentMessage/delta": {
-        const delta = typeof params.delta === "string"
-          ? params.delta
-          : typeof params.textDelta === "string"
-            ? params.textDelta
-            : "";
+        const delta =
+          typeof params.delta === "string"
+            ? params.delta
+            : typeof params.textDelta === "string"
+              ? params.textDelta
+              : "";
         if (delta) {
           this.emitMessage({ type: "stream_delta", text: delta });
         }
@@ -977,11 +1318,12 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
 
       case "item/reasoning/summaryTextDelta":
       case "item/reasoning/textDelta": {
-        const delta = typeof params.delta === "string"
-          ? params.delta
-          : typeof params.textDelta === "string"
-            ? params.textDelta
-            : "";
+        const delta =
+          typeof params.delta === "string"
+            ? params.delta
+            : typeof params.textDelta === "string"
+              ? params.textDelta
+              : "";
         if (delta) {
           this.emitMessage({ type: "thinking_delta", text: delta });
         }
@@ -1014,9 +1356,14 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
             id: randomUUID(),
             role: "assistant",
             content: [{ type: "text", text }],
-            model: "codex",
+            model: this.getMessageModel(),
           },
         });
+        break;
+      }
+
+      case "serverRequest/resolved": {
+        this.handleServerRequestResolved(params);
         break;
       }
 
@@ -1033,9 +1380,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
 
     if (status === "failed") {
       const errorObj = turn?.error as Record<string, unknown> | undefined;
-      const message = typeof errorObj?.message === "string"
-        ? errorObj.message
-        : "Turn failed";
+      const message =
+        typeof errorObj?.message === "string"
+          ? errorObj.message
+          : "Turn failed";
       this.emitMessage({
         type: "result",
         subtype: "error",
@@ -1054,7 +1402,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         subtype: "success",
         sessionId: this._threadId ?? undefined,
         ...(usage?.input != null ? { inputTokens: usage.input } : {}),
-        ...(usage?.cachedInput != null ? { cachedInputTokens: usage.cachedInput } : {}),
+        ...(usage?.cachedInput != null
+          ? { cachedInputTokens: usage.cachedInput }
+          : {}),
         ...(usage?.output != null ? { outputTokens: usage.output } : {}),
       });
     }
@@ -1080,7 +1430,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       // Do NOT set idle — waiting for plan approval
     } else {
       this.lastPlanItemText = null;
-      if (this.pendingApprovals.size === 0 && this.pendingUserInputs.size === 0) {
+      if (
+        this.pendingApprovals.size === 0 &&
+        this.pendingUserInputs.size === 0
+      ) {
         this.setStatus("idle");
       }
     }
@@ -1098,11 +1451,12 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
 
     switch (itemType) {
       case "commandexecution": {
-        const commandText = typeof item.command === "string"
-          ? item.command
-          : Array.isArray(item.command)
-            ? item.command.map((part) => String(part)).join(" ")
-            : "";
+        const commandText =
+          typeof item.command === "string"
+            ? item.command
+            : Array.isArray(item.command)
+              ? item.command.map((part) => String(part)).join(" ")
+              : "";
         this.emitMessage({
           type: "assistant",
           message: {
@@ -1116,7 +1470,7 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
                 input: { command: commandText },
               },
             ],
-            model: "codex",
+            model: this.getMessageModel(),
           },
         });
         break;
@@ -1138,7 +1492,65 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
                 },
               },
             ],
-            model: "codex",
+            model: this.getMessageModel(),
+          },
+        });
+        break;
+      }
+
+      case "dynamictoolcall": {
+        const tool = typeof item.tool === "string" ? item.tool : "DynamicTool";
+        this.emitMessage({
+          type: "assistant",
+          message: {
+            id: itemId,
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: itemId,
+                name: tool,
+                input: toToolUseInput(item.arguments),
+              },
+            ],
+            model: this.getMessageModel(),
+          },
+        });
+        break;
+      }
+
+      case "collabagenttoolcall": {
+        const tool = typeof item.tool === "string" ? item.tool : "subagent";
+        const toolName = "SubAgent";
+        const input: Record<string, unknown> = {
+          tool,
+          ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
+          ...(typeof item.senderThreadId === "string"
+            ? { senderThreadId: item.senderThreadId }
+            : {}),
+          ...(Array.isArray(item.receiverThreadIds)
+            ? { receiverThreadIds: item.receiverThreadIds }
+            : {}),
+          ...(typeof item.model === "string" ? { model: item.model } : {}),
+          ...(typeof item.reasoningEffort === "string"
+            ? { reasoningEffort: item.reasoningEffort }
+            : {}),
+          ...(item.agentsStates ? { agentsStates: item.agentsStates } : {}),
+        };
+        this.emitMessage({
+          type: "assistant",
+          message: {
+            id: itemId,
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: itemId,
+                name: toolName,
+                input,
+              },
+            ],
+            model: this.getMessageModel(),
           },
         });
         break;
@@ -1149,7 +1561,9 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     }
   }
 
-  private processItemCompleted(item: Record<string, unknown> | undefined): void {
+  private processItemCompleted(
+    item: Record<string, unknown> | undefined,
+  ): void {
     if (!item || typeof item !== "object") return;
     const itemId = typeof item.id === "string" ? item.id : randomUUID();
     const itemType = normalizeItemType(item.type);
@@ -1164,7 +1578,7 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
             id: itemId,
             role: "assistant",
             content: [{ type: "text", text }],
-            model: "codex",
+            model: this.getMessageModel(),
           },
         });
         break;
@@ -1179,11 +1593,12 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       }
 
       case "commandexecution": {
-        const output = typeof item.aggregatedOutput === "string"
-          ? item.aggregatedOutput
-          : typeof item.output === "string"
-            ? item.output
-            : "";
+        const output =
+          typeof item.aggregatedOutput === "string"
+            ? item.aggregatedOutput
+            : typeof item.output === "string"
+              ? item.output
+              : "";
         const exitCode = numberOrUndefined(item.exitCode ?? item.exit_code);
         this.emitMessage({
           type: "tool_result",
@@ -1210,6 +1625,7 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         const tool = typeof item.tool === "string" ? item.tool : "unknown";
         const toolName = `mcp:${server}/${tool}`;
         const result = item.result ?? item.error ?? "MCP call completed";
+        const normalized = normalizeMcpToolResult(result);
         this.emitMessage({
           type: "assistant",
           message: {
@@ -1223,14 +1639,29 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
                 input: (item.arguments as Record<string, unknown>) ?? {},
               },
             ],
-            model: "codex",
+            model: this.getMessageModel(),
           },
         });
         this.emitMessage({
           type: "tool_result",
           toolUseId: itemId,
-          content: typeof result === "string" ? result : JSON.stringify(result),
+          content: normalized.content,
           toolName,
+          ...(normalized.rawContentBlocks.length > 0
+            ? { rawContentBlocks: normalized.rawContentBlocks }
+            : {}),
+        });
+        break;
+      }
+
+      case "dynamictoolcall": {
+        const tool = typeof item.tool === "string" ? item.tool : "DynamicTool";
+        const content = formatDynamicToolResult(item);
+        this.emitMessage({
+          type: "tool_result",
+          toolUseId: itemId,
+          content,
+          toolName: tool,
         });
         break;
       }
@@ -1250,7 +1681,7 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
                 input: { query },
               },
             ],
-            model: "codex",
+            model: this.getMessageModel(),
           },
         });
         this.emitMessage({
@@ -1258,6 +1689,29 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
           toolUseId: itemId,
           content: query ? `Web search: ${query}` : "Web search completed",
           toolName: "WebSearch",
+        });
+        break;
+      }
+
+      case "collabagenttoolcall": {
+        const tool = typeof item.tool === "string" ? item.tool : "subagent";
+        const status =
+          typeof item.status === "string" ? item.status : "completed";
+        const receiverThreadIds = Array.isArray(item.receiverThreadIds)
+          ? item.receiverThreadIds.map((entry) => String(entry))
+          : [];
+        const content = [
+          `tool: ${tool}`,
+          `status: ${status}`,
+          ...(receiverThreadIds.length > 0
+            ? [`agents: ${receiverThreadIds.join(", ")}`]
+            : []),
+        ].join("\n");
+        this.emitMessage({
+          type: "tool_result",
+          toolUseId: itemId,
+          content,
+          toolName: "SubAgent",
         });
         break;
       }
@@ -1270,7 +1724,8 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
       }
 
       case "error": {
-        const message = typeof item.message === "string" ? item.message : "Codex item error";
+        const message =
+          typeof item.message === "string" ? item.message : "Codex item error";
         this.emitMessage({ type: "error", message });
         break;
       }
@@ -1280,15 +1735,20 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     }
   }
 
-  private async toRpcInput(
-    pendingInput: PendingInput,
-  ): Promise<{ input: Array<Record<string, unknown>> | null; tempPaths: string[] }> {
+  private async toRpcInput(pendingInput: PendingInput): Promise<{
+    input: Array<Record<string, unknown>> | null;
+    tempPaths: string[];
+  }> {
     const input: Array<Record<string, unknown>> = [];
     const tempPaths: string[] = [];
 
     // Prepend SkillUserInput if a skill reference is attached
     if (pendingInput.skill) {
-      input.push({ type: "skill", name: pendingInput.skill.name, path: pendingInput.skill.path });
+      input.push({
+        type: "skill",
+        name: pendingInput.skill.name,
+        path: pendingInput.skill.path,
+      });
     }
     input.push({ type: "text", text: pendingInput.text });
 
@@ -1317,7 +1777,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
         continue;
       }
 
-      const tempPath = join(tmpdir(), `ccpocket-codex-image-${randomUUID()}.${ext}`);
+      const tempPath = join(
+        tmpdir(),
+        `ccpocket-codex-image-${randomUUID()}.${ext}`,
+      );
       await writeFile(tempPath, buffer);
       tempPaths.push(tempPath);
       input.push({ type: "localImage", path: tempPath });
@@ -1326,7 +1789,10 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     return { input, tempPaths };
   }
 
-  private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private request(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
     const id = this.rpcSeq++;
     const envelope = { id, method, params };
 
@@ -1345,12 +1811,17 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     this.writeEnvelope({ method, params });
   }
 
-  private respondToServerRequest(id: number | string, result: Record<string, unknown>): void {
+  private respondToServerRequest(
+    id: number | string,
+    result: Record<string, unknown>,
+  ): void {
     try {
       this.writeEnvelope({ id, result });
     } catch (err) {
       if (!this.stopped) {
-        console.warn(`[codex-process] failed to respond to server request: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `[codex-process] failed to respond to server request: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   }
@@ -1387,15 +1858,86 @@ export class CodexProcess extends EventEmitter<CodexProcessEvents> {
     this.emit("message", msg);
   }
 
-  private extractToolUseId(params: Record<string, unknown>, requestId: number | string): string {
+  private extractToolUseId(
+    params: Record<string, unknown>,
+    requestId: number | string,
+  ): string {
     if (typeof params.approvalId === "string") return params.approvalId;
+    if (typeof params.elicitationId === "string") return params.elicitationId;
     if (typeof params.itemId === "string") return params.itemId;
     if (typeof requestId === "string") return requestId;
     return `approval-${requestId}`;
   }
+
+  private handleServerRequestResolved(params: Record<string, unknown>): void {
+    const requestId = params.requestId;
+    if (requestId === undefined || requestId === null) return;
+
+    const approval = [...this.pendingApprovals.values()].find(
+      (entry) => entry.requestId === requestId,
+    );
+    if (approval) {
+      this.pendingApprovals.delete(approval.toolUseId);
+      this.emitMessage({
+        type: "permission_resolved",
+        toolUseId: approval.toolUseId,
+      });
+    }
+
+    const inputRequest = [...this.pendingUserInputs.values()].find(
+      (entry) => entry.requestId === requestId,
+    );
+    if (inputRequest) {
+      this.pendingUserInputs.delete(inputRequest.toolUseId);
+      this.emitMessage({
+        type: "permission_resolved",
+        toolUseId: inputRequest.toolUseId,
+      });
+    }
+
+    if (
+      !this.pendingPlanCompletion &&
+      this.pendingApprovals.size === 0 &&
+      this.pendingUserInputs.size === 0
+    ) {
+      this.setStatus(this.pendingTurnId ? "running" : "idle");
+    }
+  }
 }
 
-function normalizeApprovalPolicy(value: CodexStartOptions["approvalPolicy"]): string {
+function buildApprovalResponse(
+  pending: PendingApproval,
+  decision: "accept" | "acceptForSession" | "decline",
+): Record<string, unknown> {
+  if (pending.kind === "permissions") {
+    return {
+      scope: decision === "acceptForSession" ? "session" : "turn",
+      permissions:
+        decision === "decline" ? {} : (pending.requestedPermissions ?? {}),
+    };
+  }
+
+  return {
+    decision,
+  };
+}
+
+function buildUserInputResponse(
+  pending: PendingUserInputRequest,
+  rawResult: string,
+): Record<string, unknown> {
+  if (pending.kind === "questions") {
+    return {
+      answers: buildUserInputAnswers(pending.questions, rawResult),
+    };
+  }
+
+  return buildElicitationResponse(pending, rawResult);
+}
+
+function normalizeApprovalPolicy(
+  value: CodexStartOptions["approvalPolicy"],
+): string {
   switch (value) {
     case "on-request":
       return "on-request";
@@ -1421,12 +1963,63 @@ function normalizeSandboxMode(value: CodexStartOptions["sandboxMode"]): string {
   }
 }
 
-function normalizeReasoningEffort(value: NonNullable<CodexStartOptions["modelReasoningEffort"]>): string {
+function normalizeReasoningEffort(
+  value: NonNullable<CodexStartOptions["modelReasoningEffort"]>,
+): string {
   switch (value) {
     case "xhigh":
       return "high";
     default:
       return value;
+  }
+}
+
+function sanitizeCodexModel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (!normalized || normalized === "codex") return undefined;
+  return normalized;
+}
+
+function extractResolvedSettingsFromThreadResponse(
+  response: Record<string, unknown>,
+): CodexResolvedSettings {
+  const thread = response.thread as Record<string, unknown> | undefined;
+  const sandbox = response.sandbox as Record<string, unknown> | undefined;
+
+  return {
+    model: sanitizeCodexModel(response.model)
+      ?? sanitizeCodexModel(thread?.model),
+    approvalPolicy:
+      typeof response.approvalPolicy === "string"
+        ? response.approvalPolicy
+        : undefined,
+    sandboxMode: normalizeSandboxModeFromRpc(sandbox?.type),
+    modelReasoningEffort:
+      typeof response.reasoningEffort === "string"
+        ? response.reasoningEffort
+        : undefined,
+    networkAccessEnabled:
+      typeof sandbox?.networkAccess === "boolean"
+        ? sandbox.networkAccess
+        : undefined,
+    webSearchMode:
+      typeof response.webSearchMode === "string"
+        ? response.webSearchMode
+        : undefined,
+  };
+}
+
+function normalizeSandboxModeFromRpc(value: unknown): string | undefined {
+  switch (value) {
+    case "dangerFullAccess":
+      return "danger-full-access";
+    case "workspaceWrite":
+      return "workspace-write";
+    case "readOnly":
+      return "read-only";
+    default:
+      return typeof value === "string" && value.length > 0 ? value : undefined;
   }
 }
 
@@ -1436,7 +2029,13 @@ function normalizeItemType(raw: unknown): string {
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 function summarizeFileChanges(changes: unknown): string {
@@ -1453,6 +2052,154 @@ function summarizeFileChanges(changes: unknown): string {
       return `${kind}: ${path}`;
     })
     .join("\n");
+}
+
+function toToolUseInput(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (Array.isArray(value)) {
+    return { items: value };
+  }
+  if (value === undefined || value === null) {
+    return {};
+  }
+  return { value };
+}
+
+function formatDynamicToolResult(item: Record<string, unknown>): string {
+  const status = typeof item.status === "string" ? item.status : "completed";
+  const success = typeof item.success === "boolean" ? item.success : null;
+  const contentItems = Array.isArray(item.contentItems)
+    ? item.contentItems
+    : null;
+  const parts = [
+    `status: ${status}`,
+    ...(success != null ? [`success: ${success}`] : []),
+  ];
+
+  if (contentItems && contentItems.length > 0) {
+    for (const entry of contentItems) {
+      if (!entry || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "item";
+      if (type === "inputText" && typeof record.text === "string") {
+        parts.push(record.text);
+        continue;
+      }
+      if (type === "inputImage" && typeof record.imageUrl === "string") {
+        parts.push(`image: ${record.imageUrl}`);
+        continue;
+      }
+      parts.push(JSON.stringify(record));
+    }
+  }
+
+  return parts.join("\n");
+}
+
+function normalizeMcpToolResult(result: unknown): {
+  content: string;
+  rawContentBlocks: Array<Record<string, unknown>>;
+} {
+  if (typeof result === "string") {
+    return { content: result, rawContentBlocks: [] };
+  }
+
+  const record =
+    result && typeof result === "object" && !Array.isArray(result)
+      ? (result as Record<string, unknown>)
+      : null;
+  const contentItems = Array.isArray(record?.content) ? record.content : null;
+  if (!contentItems) {
+    return {
+      content: result == null ? "MCP call completed" : JSON.stringify(result),
+      rawContentBlocks: [],
+    };
+  }
+
+  const textParts: string[] = [];
+  const rawContentBlocks: Array<Record<string, unknown>> = [];
+
+  for (const entry of contentItems) {
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry as Record<string, unknown>;
+    const type = typeof item.type === "string" ? item.type : "";
+
+    if (type === "text" && typeof item.text === "string") {
+      textParts.push(item.text);
+      rawContentBlocks.push({ type: "text", text: item.text });
+      continue;
+    }
+
+    if (type === "image" && typeof item.data === "string") {
+      const mimeType =
+        typeof item.mimeType === "string"
+          ? item.mimeType
+          : typeof item.mediaType === "string"
+            ? item.mediaType
+            : typeof item.media_type === "string"
+              ? item.media_type
+              : "image/png";
+      rawContentBlocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          data: item.data,
+          media_type: mimeType,
+        },
+      });
+      continue;
+    }
+
+    rawContentBlocks.push(item);
+    textParts.push(JSON.stringify(item));
+  }
+
+  const content = textParts.join("\n").trim();
+  if (content.length > 0) {
+    return { content, rawContentBlocks };
+  }
+
+  const imageCount = rawContentBlocks.filter(
+    (entry) => entry.type === "image",
+  ).length;
+  if (imageCount > 0) {
+    return {
+      content:
+        imageCount === 1
+          ? "Generated 1 image"
+          : `Generated ${imageCount} images`,
+      rawContentBlocks,
+    };
+  }
+
+  return {
+    content: result == null ? "MCP call completed" : JSON.stringify(result),
+    rawContentBlocks,
+  };
+}
+
+function toCodexThreadSummary(entry: unknown): CodexThreadSummary {
+  const record =
+    entry && typeof entry === "object"
+      ? (entry as Record<string, unknown>)
+      : {};
+  const gitInfo =
+    record.gitInfo && typeof record.gitInfo === "object"
+      ? (record.gitInfo as Record<string, unknown>)
+      : {};
+  return {
+    id: typeof record.id === "string" ? record.id : "",
+    preview: typeof record.preview === "string" ? record.preview : "",
+    createdAt: numberOrUndefined(record.createdAt) ?? 0,
+    updatedAt: numberOrUndefined(record.updatedAt) ?? 0,
+    cwd: typeof record.cwd === "string" ? record.cwd : "",
+    agentNickname: stringOrNull(record.agentNickname),
+    agentRole: stringOrNull(record.agentRole),
+    gitBranch: stringOrNull(gitInfo.branch),
+    name: stringOrNull(record.name),
+  };
 }
 
 /**
@@ -1535,17 +2282,28 @@ function normalizeUserInputQuestions(raw: unknown): Array<{
 }> {
   if (!Array.isArray(raw)) return [];
   return raw
-    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        !!entry && typeof entry === "object",
+    )
     .map((entry, index) => {
-      const id = typeof entry.id === "string" ? entry.id : `question_${index + 1}`;
+      const id =
+        typeof entry.id === "string" ? entry.id : `question_${index + 1}`;
       const question = typeof entry.question === "string" ? entry.question : "";
-      const header = typeof entry.header === "string" ? entry.header : `Question ${index + 1}`;
+      const header =
+        typeof entry.header === "string"
+          ? entry.header
+          : `Question ${index + 1}`;
       const optionsRaw = Array.isArray(entry.options) ? entry.options : [];
       const options = optionsRaw
-        .filter((option): option is Record<string, unknown> => !!option && typeof option === "object")
+        .filter(
+          (option): option is Record<string, unknown> =>
+            !!option && typeof option === "object",
+        )
         .map((option) => ({
           label: typeof option.label === "string" ? option.label : "",
-          description: typeof option.description === "string" ? option.description : "",
+          description:
+            typeof option.description === "string" ? option.description : "",
         }))
         .filter((option) => option.label.length > 0);
       return {
@@ -1568,7 +2326,8 @@ function buildUserInputAnswers(
   const answerMap: Record<string, { answers: string[] }> = {};
 
   for (const question of questions) {
-    const candidate = parsed.byId[question.id] ?? parsed.byQuestion[question.question];
+    const candidate =
+      parsed.byId[question.id] ?? parsed.byQuestion[question.question];
     const answers = normalizeAnswerValues(candidate);
     if (answers.length > 0) {
       answerMap[question.id] = { answers };
@@ -1594,7 +2353,9 @@ function parseResultObject(rawResult: string): {
     if (parsed && typeof parsed === "object") {
       const answers = parsed.answers;
       if (answers && typeof answers === "object" && !Array.isArray(answers)) {
-        for (const [key, value] of Object.entries(answers as Record<string, unknown>)) {
+        for (const [key, value] of Object.entries(
+          answers as Record<string, unknown>,
+        )) {
           byId[key] = value;
           byQuestion[key] = value;
         }
@@ -1635,15 +2396,214 @@ function normalizeAnswerValues(value: unknown): string[] {
   return normalized ? [normalized] : [];
 }
 
+function buildElicitationResponse(
+  pending: PendingUserInputRequest,
+  rawResult: string,
+): Record<string, unknown> {
+  if (pending.kind === "elicitation_url") {
+    const action = parseElicitationAction(rawResult);
+    return {
+      action,
+      content: null,
+      _meta: null,
+    };
+  }
+
+  const parsed = parseResultObject(rawResult);
+  const content: Record<string, unknown> = {};
+
+  for (const question of pending.questions) {
+    const candidate =
+      parsed.byId[question.id] ?? parsed.byQuestion[question.question];
+    const answers = normalizeAnswerValues(candidate);
+    if (answers.length === 1) {
+      content[question.id] = answers[0];
+    } else if (answers.length > 1) {
+      content[question.id] = answers;
+    }
+  }
+
+  if (Object.keys(content).length === 0 && pending.questions.length === 1) {
+    const answers = normalizeAnswerValues(rawResult);
+    if (answers.length === 1) {
+      content[pending.questions[0].id] = answers[0];
+    } else if (answers.length > 1) {
+      content[pending.questions[0].id] = answers;
+    }
+  }
+
+  return {
+    action: "accept",
+    content: Object.keys(content).length > 0 ? content : null,
+    _meta: null,
+  };
+}
+
+function parseElicitationAction(
+  rawResult: string,
+): "accept" | "decline" | "cancel" {
+  const normalized = rawResult.trim().toLowerCase();
+  if (normalized.includes("cancel")) return "cancel";
+  if (normalized.includes("decline") || normalized.includes("deny"))
+    return "decline";
+
+  try {
+    const parsed = JSON.parse(rawResult) as Record<string, unknown>;
+    const answers = parsed.answers;
+    if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+      const first = Object.values(answers as Record<string, unknown>)[0];
+      const answer = normalizeAnswerValues(first).join(" ").toLowerCase();
+      if (answer.includes("cancel")) return "cancel";
+      if (answer.includes("decline") || answer.includes("deny"))
+        return "decline";
+    }
+  } catch {
+    // Fall through to accept.
+  }
+
+  return "accept";
+}
+
+function createElicitationInput(params: Record<string, unknown>): {
+  input: Record<string, unknown>;
+  questions: PendingUserInputQuestion[];
+  kind: PendingUserInputRequest["kind"];
+} {
+  const serverName =
+    typeof params.serverName === "string" ? params.serverName : "MCP";
+  const message =
+    typeof params.message === "string" ? params.message : "Provide input";
+
+  if (params.mode === "url") {
+    const url = typeof params.url === "string" ? params.url : "";
+    const question = url ? `${message}\n${url}` : message;
+    return {
+      kind: "elicitation_url",
+      questions: [{ id: "elicitation_action", question }],
+      input: {
+        mode: "url",
+        serverName,
+        url,
+        message,
+        questions: [
+          {
+            id: "elicitation_action",
+            header: serverName,
+            question,
+            options: [
+              { label: "Accept", description: "Continue with this request" },
+              { label: "Decline", description: "Reject this request" },
+              { label: "Cancel", description: "Cancel without accepting" },
+            ],
+            multiSelect: false,
+            isOther: false,
+            isSecret: false,
+          },
+        ],
+      },
+    };
+  }
+
+  const schema = asRecord(params.requestedSchema);
+  const properties = asRecord(schema?.properties) ?? {};
+  const requiredFields = new Set(
+    Array.isArray(schema?.required)
+      ? schema!.required!.map((entry) => String(entry))
+      : [],
+  );
+
+  const questions = Object.entries(properties)
+    .filter(([, value]) => value && typeof value === "object")
+    .map(([key, value]) => {
+      const field = value as Record<string, unknown>;
+      const title = typeof field.title === "string" ? field.title : key;
+      const description =
+        typeof field.description === "string" ? field.description : message;
+      const enumValues = Array.isArray(field.enum)
+        ? field.enum.map((entry) => String(entry))
+        : [];
+      const type = typeof field.type === "string" ? field.type : "";
+      const options =
+        enumValues.length > 0
+          ? enumValues.map((entry, index) => ({
+              label: entry,
+              description: index === 0 ? description : "",
+            }))
+          : type === "boolean"
+            ? [
+                { label: "true", description: description },
+                { label: "false", description: "" },
+              ]
+            : [];
+
+      return {
+        id: key,
+        question: requiredFields.has(key) ? `${title} (required)` : title,
+        header: serverName,
+        options,
+        isOther: options.length === 0,
+        isSecret: false,
+      };
+    });
+
+  const normalizedQuestions =
+    questions.length > 0
+      ? questions
+      : [
+          {
+            id: "value",
+            question: message,
+            header: serverName,
+            options: [] as Array<{ label: string; description: string }>,
+            isOther: true,
+            isSecret: false,
+          },
+        ];
+
+  return {
+    kind: "elicitation_form",
+    questions: normalizedQuestions.map((question) => ({
+      id: question.id,
+      question: question.question,
+    })),
+    input: {
+      mode: "form",
+      serverName,
+      message,
+      requestedSchema: schema,
+      questions: normalizedQuestions.map((question) => ({
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        options: question.options,
+        multiSelect: false,
+        isOther: question.isOther,
+        isSecret: question.isSecret,
+      })),
+    },
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 function formatPlanUpdateText(params: Record<string, unknown>): string {
   const stepsRaw = params.plan;
   if (!Array.isArray(stepsRaw) || stepsRaw.length === 0) return "";
 
-  const explanation = typeof params.explanation === "string" ? params.explanation.trim() : "";
+  const explanation =
+    typeof params.explanation === "string" ? params.explanation.trim() : "";
   const lines = stepsRaw
-    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        !!entry && typeof entry === "object",
+    )
     .map((entry, index) => {
-      const step = typeof entry.step === "string" ? entry.step : `Step ${index + 1}`;
+      const step =
+        typeof entry.step === "string" ? entry.step : `Step ${index + 1}`;
       const status = normalizePlanStatus(entry.status);
       return `${index + 1}. [${status}] ${step}`;
     });
